@@ -1,0 +1,62 @@
+name: .NET CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Restore dependencies
+        run: dotnet restore VirtualTickets.Api.csproj
+
+      - name: Build
+        run: dotnet build VirtualTickets.Api.csproj --configuration Release --no-restore
+
+      - name: Run tests
+        run: |
+          test_projects=$(find . -name "*Tests.csproj" -o -name "*Test.csproj")
+
+          if [ -z "$test_projects" ]; then
+            echo "No test projects found. Skipping tests."
+          else
+            while IFS= read -r project; do
+              echo "Running tests for $project"
+              dotnet test "$project" \
+                --configuration Release \
+                --no-restore \
+                --verbosity normal
+            done <<< "$test_projects"
+          fi
+
+      - name: Publish application
+        run: |
+          dotnet publish VirtualTickets.Api.csproj \
+            --configuration Release \
+            --no-build \
+            --output ./publish
+
+      - name: Upload published application
+        uses: actions/upload-artifact@v4
+        with:
+          name: published-api
+          path: ./publish
+          if-no-files-found: error
+          retention-days: 7
