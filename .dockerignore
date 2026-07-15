@@ -1,0 +1,50 @@
+# Git
+.git
+.gitignore
+.github
+
+# Build output
+bin
+obj
+
+# Visual Studio
+.vs
+.vscode
+.idea
+
+# User-specific files
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+logs
+
+# Test and coverage
+TestResults
+coverage
+
+# Publish output
+publish
+
+# Documentation (optional)
+README.md
+
+# OS files
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Temporary files
+*.tmp
+*.cache
+
+# Artifacts
+artifacts
