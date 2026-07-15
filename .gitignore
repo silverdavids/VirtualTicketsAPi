@@ -1,0 +1,52 @@
+# Build output
+bin/
+obj/
+
+# User-specific files
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# Visual Studio
+.vs/
+
+# Rider
+.idea/
+
+# VS Code
+.vscode/
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+logs/
+
+# ASP.NET secrets
+secrets.json
+
+# Publish output
+publish/
+
+# Test output
+TestResults/
+
+# NuGet
+*.nupkg
+
+# OS files
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Coverage
+coverage/
+*.coverage
+*.coveragexml
+
+# Generated artifacts
+artifacts/

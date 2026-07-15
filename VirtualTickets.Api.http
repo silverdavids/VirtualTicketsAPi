@@ -1,0 +1,63 @@
+@VirtualTickets.Api_HostAddress = http://127.0.0.1:5088
+
+GET {{VirtualTickets.Api_HostAddress}}/api/health
+Accept: application/json
+
+###
+
+POST {{VirtualTickets.Api_HostAddress}}/api/tickets/validate
+Content-Type: application/json
+
+{
+  "source": "VirtualDisplay",
+  "provider": "ExampleProvider",
+  "providerEventId": "EVT-123",
+  "externalTicketId": "EXT-456",
+  "sourceDisplayId": "DISPLAY-1",
+  "shopCode": "SHOP001",
+  "username": "cashier1",
+  "stake": 1000,
+  "selections": [
+    {
+      "providerMatchId": "PM-1",
+      "matchId": 12345,
+      "matchOddId": 67890,
+      "market": "Winner",
+      "option": "Home",
+      "line": null,
+      "odd": 1.85,
+      "shortCode": "H"
+    }
+  ]
+}
+
+###
+
+POST {{VirtualTickets.Api_HostAddress}}/api/tickets/place
+Content-Type: application/json
+
+{
+  "source": "VirtualDisplay",
+  "provider": "ExampleProvider",
+  "providerEventId": "EVT-123",
+  "externalTicketId": "EXT-456",
+  "sourceDisplayId": "DISPLAY-1",
+  "shopCode": "1",
+  "userId": "f78187cd-bef7-4f16-8728-3a0031125879",
+  "stake": 1000,
+  "selections": [
+    {
+      "providerMatchId": "2497914707",
+      "matchId": 2138161725,
+      "homeTeam": "ATM",
+      "awayTeam": "CEL",
+      "market": "Winner",
+      "option": "Home",
+      "line": null,
+      "odd": 1.85,
+      "shortCode": "H"
+    }
+  ]
+}
+
+###
