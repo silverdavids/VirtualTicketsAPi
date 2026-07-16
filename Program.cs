@@ -9,6 +9,7 @@ using VirtualTickets.Api.Services.Validation;
 DotEnv.Load(Path.Combine(Directory.GetCurrentDirectory(), ".env"));
 
 var builder = WebApplication.CreateBuilder(args);
+const string DisplayCorsPolicy = "DisplayCors";
 
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
@@ -33,18 +34,15 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
 builder.Services.AddAuthorization();
 builder.Services.AddCors(options =>
 {
-    options.AddPolicy("VirtualDisplayCors", policy =>
+    options.AddPolicy(DisplayCorsPolicy, policy =>
     {
         policy
             .WithOrigins(
-                "http://localhost:3000",
                 "http://localhost:3001",
-                "http://localhost:3002",
-                "http://127.0.0.1:3000",
-                "http://127.0.0.1:3001",
-                "http://127.0.0.1:3002")
-            .WithMethods("GET", "POST", "OPTIONS")
-            .WithHeaders("Content-Type", "Authorization", "X-Virtual-Tickets-Key");
+                "http://45.77.54.107:10021",
+                "http://45.77.54.107:10010")
+            .AllowAnyHeader()
+            .AllowAnyMethod();
     });
 });
 
@@ -74,7 +72,7 @@ if (!jwtOptions.IsConfigured && app.Environment.IsDevelopment())
 app.UseSwagger();
 app.UseSwaggerUI();
 
-app.UseCors("VirtualDisplayCors");
+app.UseCors(DisplayCorsPolicy);
 app.UseMiddleware<VirtualTicketsApiKeyMiddleware>();
 app.UseAuthentication();
 app.UseAuthorization();
