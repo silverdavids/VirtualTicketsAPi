@@ -1,5 +1,6 @@
 using Microsoft.Data.SqlClient;
 using VirtualTickets.Api.Contracts;
+using VirtualTickets.Api.Services;
 
 namespace VirtualTickets.Api.Data;
 
@@ -197,11 +198,12 @@ public sealed class TicketDb
         long activeSetNo,
         CancellationToken cancellationToken)
     {
-        await using var connection = await OpenConnectionAsync(cancellationToken);
-        await using var transaction = (SqlTransaction)await connection.BeginTransactionAsync(cancellationToken);
-
-        try
+        for (var attempt = 1; attempt <= 5; attempt++)
         {
+            await using var connection = await OpenConnectionAsync(cancellationToken);
+            await using var transaction = (SqlTransaction)await connection.BeginTransactionAsync(cancellationToken);
+            try
+            {
             var errors = new List<TicketValidationError>();
             var branchId = await ResolveBranchIdAsync(connection, transaction, request, cancellationToken);
             if (!branchId.HasValue)
@@ -240,6 +242,7 @@ public sealed class TicketDb
             }
 
             var serial = Guid.NewGuid();
+            var ticketNumber = TicketNumber.Generate();
             var receiptId = await InsertReceiptAsync(
                 connection,
                 transaction,
@@ -247,6 +250,7 @@ public sealed class TicketDb
                 activeSetNo,
                 branchId!.Value,
                 serial,
+                ticketNumber,
                 cancellationToken);
 
             var placedBets = new List<PlacedBetResponse>();
@@ -262,13 +266,18 @@ public sealed class TicketDb
             }
 
             await transaction.CommitAsync(cancellationToken);
-            return TicketPlaceResult.Placed(receiptId, serial, placedBets);
-        }
-        catch (SqlException exception)
-        {
-            await RollbackQuietlyAsync(transaction, cancellationToken);
-            _logger.LogError(exception, "Ticket placement failed while writing receipt or bets.");
-            return TicketPlaceResult.Failed(
+                return TicketPlaceResult.Placed(receiptId, serial, ticketNumber, placedBets);
+            }
+            catch (SqlException exception) when (IsTicketNumberCollision(exception) && attempt < 5)
+            {
+                await RollbackQuietlyAsync(transaction, cancellationToken);
+                _logger.LogWarning("Ticket-number collision on placement attempt {Attempt}; retrying.", attempt);
+            }
+            catch (SqlException exception)
+            {
+                await RollbackQuietlyAsync(transaction, cancellationToken);
+                _logger.LogError(exception, "Ticket placement failed while writing receipt or bets.");
+                return TicketPlaceResult.Failed(
             [
                 new TicketValidationError
                 {
@@ -277,7 +286,18 @@ public sealed class TicketDb
                     Message = GetSafeDatabaseErrorMessage(exception)
                 }
             ]);
+            }
         }
+
+        return TicketPlaceResult.Failed(
+        [
+            new TicketValidationError
+            {
+                Code = "ticket_number_generation_failed",
+                Field = "ticketNumber",
+                Message = "A unique ticket number could not be generated."
+            }
+        ]);
     }
 
     private async Task<string?> FindTableAsync(IEnumerable<string> tableNames, CancellationToken cancellationToken)
@@ -484,6 +504,7 @@ public sealed class TicketDb
         long activeSetNo,
         int branchId,
         Guid serial,
+        string ticketNumber,
         CancellationToken cancellationToken)
     {
         var totalOdds = request.Selections.Aggregate(1m, (current, selection) => current * selection.Odd);
@@ -507,6 +528,7 @@ public sealed class TicketDb
                 WonSize,
                 BranchId,
                 Serial,
+                SerialCode,
                 ReceiptStatus,
                 Bonus,
                 Tax,
@@ -532,6 +554,7 @@ public sealed class TicketDb
                 0,
                 @branchId,
                 @serial,
+                @ticketNumber,
                 @receiptStatus,
                 0,
                 0,
@@ -554,6 +577,7 @@ public sealed class TicketDb
                 new("@submittedSize", request.Selections.Count),
                 new("@branchId", branchId),
                 new("@serial", serial),
+                new("@ticketNumber", ticketNumber),
                 new("@receiptStatus", (int)ReceiptStatus.Pending),
                 new("@createdOn", now),
                 new("@createdOnUtc", utcNow),
@@ -655,6 +679,10 @@ public sealed class TicketDb
             // Preserve the original placement failure.
         }
     }
+
+    private static bool IsTicketNumberCollision(SqlException exception) =>
+        exception.Number is 2601 or 2627
+        && exception.Message.Contains("UX_Receipts_SerialCode", StringComparison.OrdinalIgnoreCase);
 
     private async Task AddReferenceTableAsync(
         string logicalName,
@@ -770,12 +798,13 @@ public sealed record TicketPlaceResult(
     bool IsPlaced,
     int? ReceiptId,
     Guid? Serial,
+    string? TicketNumber,
     List<PlacedBetResponse> Bets,
     List<TicketValidationError> Errors)
 {
-    public static TicketPlaceResult Placed(int receiptId, Guid serial, List<PlacedBetResponse> bets) =>
-        new(true, receiptId, serial, bets, []);
+    public static TicketPlaceResult Placed(int receiptId, Guid serial, string ticketNumber, List<PlacedBetResponse> bets) =>
+        new(true, receiptId, serial, ticketNumber, bets, []);
 
     public static TicketPlaceResult Failed(List<TicketValidationError> errors) =>
-        new(false, null, null, [], errors);
+        new(false, null, null, null, [], errors);
 }
