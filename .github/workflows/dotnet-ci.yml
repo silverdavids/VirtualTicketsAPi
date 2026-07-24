@@ -46,7 +46,6 @@ jobs:
               echo "Running tests for $project"
               dotnet test "$project" \
                 --configuration Release \
-                --no-restore \
                 --verbosity normal
             done <<< "$test_projects"
           fi
