@@ -2,6 +2,7 @@ using System.Data;
 using System.Globalization;
 using System.Security.Claims;
 using Microsoft.Data.SqlClient;
+using Microsoft.Extensions.Options;
 using VirtualTickets.Api.Contracts;
 using VirtualTickets.Api.Data;
 
@@ -9,21 +10,24 @@ namespace VirtualTickets.Api.Services;
 
 public sealed class TicketPayoutService
 {
-    private const string VirtualDisplaySource = "VirtualDisplay";
     private readonly string? _connectionString;
     private readonly IHttpContextAccessor _httpContextAccessor;
     private readonly ILogger<TicketPayoutService> _logger;
     private readonly string _currency;
+    private readonly Guid? _configuredPayoutUserId;
 
     public TicketPayoutService(
         IHttpContextAccessor httpContextAccessor,
-        IConfiguration configuration,
+        IOptions<VirtualTicketPayoutOptions> options,
         ILogger<TicketPayoutService> logger)
     {
         _connectionString = Environment.GetEnvironmentVariable("VIRTUAL_TICKETS_CONNECTION_STRING");
         _httpContextAccessor = httpContextAccessor;
         _logger = logger;
-        _currency = configuration["VirtualTickets:Currency"] ?? "UGX";
+        _currency = string.IsNullOrWhiteSpace(options.Value.Currency)
+            ? "UGX"
+            : options.Value.Currency.Trim().ToUpperInvariant();
+        _configuredPayoutUserId = options.Value.PayoutUserId;
     }
 
     public async Task<TicketPayoutLookupResponse> LookupAsync(
@@ -33,6 +37,8 @@ public sealed class TicketPayoutService
         var ticketNumber = ValidateTicketNumber(request.TicketNumber);
         var identity = ResolveTerminalIdentity();
         await using var connection = await OpenAsync(cancellationToken);
+        await ValidateActiveTerminalAsync(connection, null, identity, cancellationToken);
+        await ResolvePayoutUserAsync(connection, null, identity.BranchId, false, cancellationToken);
         var receipt = await FindReceiptAsync(connection, null, ticketNumber, false, cancellationToken)
             ?? throw Error(404, "TicketNotFound", "Ticket was not found.", ticketNumber);
 
@@ -57,6 +63,7 @@ public sealed class TicketPayoutService
 
         try
         {
+            await ValidateActiveTerminalAsync(connection, transaction, identity, cancellationToken);
             var receipt = await FindReceiptAsync(connection, transaction, ticketNumber, true, cancellationToken)
                 ?? throw Error(404, "TicketNotFound", "Ticket was not found.", ticketNumber);
             var eligibility = ToLookup(receipt, identity.BranchId);
@@ -65,15 +72,12 @@ public sealed class TicketPayoutService
                 throw EligibilityError(eligibility);
             }
 
-            var userId = await ResolveActiveShiftUserAsync(
+            var payoutUserId = await ResolvePayoutUserAsync(
                 connection,
                 transaction,
-                identity.TerminalId,
+                identity.BranchId,
+                true,
                 cancellationToken);
-            if (userId is null)
-            {
-                throw Error(403, "PayoutNotAuthorized", "The terminal has no active user shift.", ticketNumber);
-            }
 
             var payoutReference = CreatePayoutReference();
             var paidAt = DateTime.UtcNow;
@@ -111,13 +115,13 @@ public sealed class TicketPayoutService
                 INSERT INTO dbo.VirtualTicketPayouts
                 (
                     ReceiptId, TicketNumber, Amount, Currency, OriginalReceiptStatus,
-                    ResultingReceiptStatus, TerminalId, TerminalCode, UserId, BranchId,
+                    ResultingReceiptStatus, TerminalId, TerminalCode, PaidByUserId, BranchId,
                     PayoutReference, ConfirmationReference, PaidAtUtc
                 )
                 VALUES
                 (
                     @receiptId, @ticketNumber, @amount, @currency, @won,
-                    @paid, @terminalId, @terminalCode, @userId, @branchId,
+                    @paid, @terminalId, @terminalCode, @payoutUserId, @branchId,
                     @payoutReference, @confirmationReference, @paidAt
                 );
                 """,
@@ -130,7 +134,7 @@ public sealed class TicketPayoutService
                     new("@paid", (int)ReceiptStatus.Paid),
                     new("@terminalId", identity.TerminalId),
                     new("@terminalCode", identity.TerminalCode),
-                    new("@userId", userId),
+                    new("@payoutUserId", payoutUserId),
                     new("@branchId", identity.BranchId),
                     new("@payoutReference", payoutReference),
                     new("@confirmationReference", (object?)clientReference ?? DBNull.Value),
@@ -145,7 +149,7 @@ public sealed class TicketPayoutService
                 UPDATE dbo.Receipts
                 SET ReceiptStatus = @paid,
                     AmountPaid = @amount,
-                    PaidBy = @userId,
+                    PaidBy = @payoutUserId,
                     PayingBranchId = @branchId,
                     TimePaid = @paidAt,
                     PaymentReference = @payoutReference,
@@ -158,7 +162,7 @@ public sealed class TicketPayoutService
                 [
                     new("@paid", (int)ReceiptStatus.Paid),
                     new("@amount", receipt.PayableAmount),
-                    new("@userId", userId),
+                    new("@payoutUserId", payoutUserId),
                     new("@branchId", identity.BranchId),
                     new("@paidAt", paidAt),
                     new("@payoutReference", payoutReference),
@@ -173,10 +177,10 @@ public sealed class TicketPayoutService
 
             await transaction.CommitAsync(cancellationToken);
             _logger.LogInformation(
-                "Virtual ticket payout completed. ReceiptId={ReceiptId} TicketNumber={TicketNumber} Amount={Amount} Currency={Currency} OriginalStatus={OriginalStatus} ResultingStatus={ResultingStatus} TerminalId={TerminalId} TerminalCode={TerminalCode} UserId={UserId} BranchId={BranchId} PayoutReference={PayoutReference} ConfirmationReference={ConfirmationReference} PaidAtUtc={PaidAtUtc}",
+                "Virtual ticket payout completed. ReceiptId={ReceiptId} TicketNumber={TicketNumber} Amount={Amount} Currency={Currency} OriginalStatus={OriginalStatus} ResultingStatus={ResultingStatus} TerminalId={TerminalId} TerminalCode={TerminalCode} PayoutUserId={PayoutUserId} BranchId={BranchId} PayoutReference={PayoutReference} ConfirmationReference={ConfirmationReference} PaidAtUtc={PaidAtUtc}",
                 receipt.ReceiptId, ticketNumber, receipt.PayableAmount, _currency,
                 ReceiptStatus.Won, ReceiptStatus.Paid, identity.TerminalId, identity.TerminalCode,
-                userId, identity.BranchId, payoutReference, clientReference, paidAt);
+                payoutUserId, identity.BranchId, payoutReference, clientReference, paidAt);
 
             return new(
                 receipt.ReceiptId,
@@ -201,23 +205,14 @@ public sealed class TicketPayoutService
 
     private TicketPayoutLookupResponse ToLookup(PayoutReceipt receipt, int terminalBranchId)
     {
-        string? reason = null;
-        if (!string.Equals(receipt.PaymentSource, VirtualDisplaySource, StringComparison.OrdinalIgnoreCase))
-            reason = "NotVirtualTicket";
-        else if (receipt.BranchId != terminalBranchId)
-            reason = "WrongBranch";
-        else if (receipt.IsCanceled || receipt.Status == ReceiptStatus.Cancelled)
-            reason = "Cancelled";
-        else if (receipt.Status == ReceiptStatus.Blocked)
-            reason = "Blocked";
-        else if (receipt.Status == ReceiptStatus.Paid)
-            reason = "AlreadyPaid";
-        else if (!receipt.AllSelectionsSettled || receipt.Status is ReceiptStatus.Pending or ReceiptStatus.Inactive)
-            reason = "Pending";
-        else if (receipt.Status == ReceiptStatus.Lost)
-            reason = "Lost";
-        else if (receipt.Status != ReceiptStatus.Won)
-            reason = "Blocked";
+        var reason = TicketPayoutEligibility.GetCannotPayoutReason(
+            receipt.PaymentSource,
+            receipt.BranchId,
+            terminalBranchId,
+            receipt.IsCanceled,
+            receipt.Status,
+            receipt.AllSelectionsSettled,
+            receipt.AllSelectionsWon);
 
         return new(
             receipt.ReceiptId,
@@ -294,7 +289,10 @@ public sealed class TicketPayoutService
                 r.TimePaid, r.PaymentReference,
                 CASE WHEN COUNT(b.BetId) > 0
                        AND SUM(CASE WHEN b.GameBetStatus IN (1, 2) THEN 1 ELSE 0 END) = COUNT(b.BetId)
-                     THEN CAST(1 AS bit) ELSE CAST(0 AS bit) END AS AllSelectionsSettled
+                     THEN CAST(1 AS bit) ELSE CAST(0 AS bit) END AS AllSelectionsSettled,
+                CASE WHEN COUNT(b.BetId) > 0
+                       AND SUM(CASE WHEN b.GameBetStatus = 2 THEN 1 ELSE 0 END) = COUNT(b.BetId)
+                     THEN CAST(1 AS bit) ELSE CAST(0 AS bit) END AS AllSelectionsWon
             FROM dbo.Receipts r{lockHint}
             LEFT JOIN dbo.Bets b ON b.RecieptId = r.ReceiptId
             WHERE UPPER(LTRIM(RTRIM(r.SerialCode))) = @ticketNumber
@@ -323,29 +321,70 @@ public sealed class TicketPayoutService
             Convert.ToInt32(reader["BranchId"]),
             reader["PaymentSource"] is DBNull ? null : Convert.ToString(reader["PaymentSource"]),
             Convert.ToBoolean(reader["AllSelectionsSettled"]),
+            Convert.ToBoolean(reader["AllSelectionsWon"]),
             reader["TimePaid"] is DBNull ? null : Convert.ToDateTime(reader["TimePaid"]),
             reader["PaymentReference"] is DBNull ? null : Convert.ToString(reader["PaymentReference"]));
     }
 
-    private static async Task<string?> ResolveActiveShiftUserAsync(
+    private async Task<string> ResolvePayoutUserAsync(
         SqlConnection connection,
-        SqlTransaction transaction,
-        int terminalId,
+        SqlTransaction? transaction,
+        int terminalBranchId,
+        bool lockUser,
+        CancellationToken cancellationToken)
+    {
+        var payoutUserId = PayoutUserAuthorization.RequireConfigured(_configuredPayoutUserId);
+        var lockHint = lockUser ? " WITH (UPDLOCK, HOLDLOCK)" : string.Empty;
+        await using var command = new SqlCommand(
+            $"""
+            SELECT CASE WHEN EXISTS
+            (
+                SELECT 1
+                FROM dbo.AspNetUsers u{lockHint}
+                INNER JOIN dbo.Accounts a ON a.UserId = u.Id
+                WHERE u.Id = @payoutUserId
+                  AND u.IsActivated = 1
+                  AND a.BranchId = @branchId
+            )
+            THEN CAST(1 AS bit) ELSE CAST(0 AS bit) END;
+            """,
+            connection,
+            transaction);
+        command.Parameters.Add(new("@payoutUserId", payoutUserId));
+        command.Parameters.Add(new("@branchId", terminalBranchId));
+        var isValid = Convert.ToBoolean(await command.ExecuteScalarAsync(cancellationToken));
+        return PayoutUserAuthorization.RequireActive(payoutUserId, isValid);
+    }
+
+    private static async Task ValidateActiveTerminalAsync(
+        SqlConnection connection,
+        SqlTransaction? transaction,
+        TerminalClaims identity,
         CancellationToken cancellationToken)
     {
         await using var command = new SqlCommand(
             """
-            SELECT TOP (1) UserId
-            FROM dbo.Shifts WITH (UPDLOCK, HOLDLOCK)
-            WHERE TerminalId = @terminalId
-              AND ISNULL(IsClosed, 0) = 0
-              AND UserId IS NOT NULL
-            ORDER BY StartTime DESC;
+            SELECT CASE WHEN EXISTS
+            (
+                SELECT 1
+                FROM dbo.Terminals
+                WHERE TerminalId = @terminalId
+                  AND IsActive = 1
+                  AND TerminalType = 1
+                  AND BranchId = @branchId
+                  AND UPPER(LTRIM(RTRIM(TerminalCode))) = UPPER(@terminalCode)
+            )
+            THEN CAST(1 AS bit) ELSE CAST(0 AS bit) END;
             """,
             connection,
             transaction);
-        command.Parameters.Add(new("@terminalId", terminalId));
-        return await command.ExecuteScalarAsync(cancellationToken) as string;
+        command.Parameters.Add(new("@terminalId", identity.TerminalId));
+        command.Parameters.Add(new("@branchId", identity.BranchId));
+        command.Parameters.Add(new("@terminalCode", identity.TerminalCode));
+        if (!Convert.ToBoolean(await command.ExecuteScalarAsync(cancellationToken)))
+        {
+            throw Error(403, "PayoutNotAuthorized", "The virtual-display terminal is not active.");
+        }
     }
 
     private static async Task<int> ExecuteNonQueryAsync(
@@ -390,5 +429,5 @@ public sealed class TicketPayoutService
         long ReceiptId, string TicketNumber, DateTime PlacedAt, decimal Stake,
         decimal TotalOdds, decimal PossibleWin, decimal PayableAmount, ReceiptStatus Status,
         bool IsCanceled, int BranchId, string? PaymentSource, bool AllSelectionsSettled,
-        DateTime? PaidAt, string? PayoutReference);
+        bool AllSelectionsWon, DateTime? PaidAt, string? PayoutReference);
 }

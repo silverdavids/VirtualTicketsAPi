@@ -33,7 +33,7 @@ BEGIN
         ResultingReceiptStatus INT NOT NULL,
         TerminalId INT NOT NULL,
         TerminalCode NVARCHAR(100) NOT NULL,
-        UserId VARCHAR(36) NOT NULL,
+        PaidByUserId VARCHAR(36) NOT NULL,
         BranchId INT NOT NULL,
         PayoutReference VARCHAR(30) NOT NULL,
         ConfirmationReference VARCHAR(100) NULL,
@@ -51,6 +51,15 @@ BEGIN
         ON dbo.VirtualTicketPayouts(ReceiptId);
     CREATE UNIQUE INDEX UX_VirtualTicketPayouts_PayoutReference
         ON dbo.VirtualTicketPayouts(PayoutReference);
+END;
+
+IF COL_LENGTH(N'dbo.VirtualTicketPayouts', N'PaidByUserId') IS NULL
+   AND COL_LENGTH(N'dbo.VirtualTicketPayouts', N'UserId') IS NOT NULL
+BEGIN
+    EXEC sys.sp_rename
+        N'dbo.VirtualTicketPayouts.UserId',
+        N'PaidByUserId',
+        N'COLUMN';
 END;
 
 COMMIT TRANSACTION;

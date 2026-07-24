@@ -28,6 +28,12 @@ builder.Services.Configure<VirtualTicketsJwtOptions>(options =>
         options.Minutes = minutes;
     }
 });
+builder.Services.Configure<VirtualTicketPayoutOptions>(options =>
+{
+    var section = builder.Configuration.GetSection(VirtualTicketPayoutOptions.SectionName);
+    options.Currency = section["Currency"] ?? options.Currency;
+    options.PayoutUserId = VirtualTicketPayoutOptions.ParsePayoutUserId(section["PayoutUserId"]);
+});
 builder.Services.AddSingleton<IConfigureOptions<JwtBearerOptions>, VirtualTicketsJwtConfigurator>();
 builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
     .AddJwtBearer();
