@@ -203,6 +203,123 @@ public sealed class TicketPayoutService
         }
     }
 
+    public async Task<TicketCancelResponse> CancelAsync(
+        TicketCancelRequest request,
+        CancellationToken cancellationToken)
+    {
+        var ticketNumber = ValidateTicketNumber(request.TicketNumber);
+        ValidateOptionalText(request.ConfirmationReference, 100, "Confirmation reference", ticketNumber);
+        ValidateOptionalText(request.Reason, 500, "Cancellation reason", ticketNumber);
+
+        var identity = ResolveTerminalIdentity();
+        await using var connection = await OpenAsync(cancellationToken);
+        await using var transaction = (SqlTransaction)await connection.BeginTransactionAsync(
+            IsolationLevel.Serializable,
+            cancellationToken);
+
+        try
+        {
+            await ValidateActiveTerminalAsync(connection, transaction, identity, cancellationToken);
+            var receipt = await FindReceiptAsync(connection, transaction, ticketNumber, true, cancellationToken)
+                ?? throw Error(404, "TicketNotFound", "Ticket was not found.", ticketNumber);
+            var cannotCancelReason = GetCannotCancelReason(receipt, identity.BranchId);
+            if (cannotCancelReason is not null)
+                throw CancellationEligibilityError(cannotCancelReason, ticketNumber);
+
+            var userId = await ResolvePayoutUserAsync(
+                connection,
+                transaction,
+                identity.BranchId,
+                true,
+                cancellationToken);
+            var cancelledAt = DateTime.UtcNow;
+            var cancelReference = CreateCancelReference();
+            var confirmationReference = NormalizeOptionalText(request.ConfirmationReference);
+            var reason = NormalizeOptionalText(request.Reason) ?? "CustomerRequested";
+
+            await ExecuteNonQueryAsync(
+                connection,
+                transaction,
+                """
+                INSERT INTO dbo.VirtualTicketCancellations
+                (
+                    ReceiptId, TicketNumber, OriginalReceiptStatus, ResultingReceiptStatus,
+                    TerminalId, TerminalCode, UserId, BranchId, CancelReference,
+                    ConfirmationReference, CancelledAtUtc, Reason
+                )
+                VALUES
+                (
+                    @receiptId, @ticketNumber, @pending, @cancelled,
+                    @terminalId, @terminalCode, @userId, @branchId, @cancelReference,
+                    @confirmationReference, @cancelledAt, @reason
+                );
+                """,
+                [
+                    new("@receiptId", receipt.ReceiptId),
+                    new("@ticketNumber", ticketNumber),
+                    new("@pending", (int)ReceiptStatus.Pending),
+                    new("@cancelled", (int)ReceiptStatus.Cancelled),
+                    new("@terminalId", identity.TerminalId),
+                    new("@terminalCode", identity.TerminalCode),
+                    new("@userId", userId),
+                    new("@branchId", identity.BranchId),
+                    new("@cancelReference", cancelReference),
+                    new("@confirmationReference", (object?)confirmationReference ?? DBNull.Value),
+                    new("@cancelledAt", cancelledAt),
+                    new("@reason", reason)
+                ],
+                cancellationToken);
+
+            var receiptUpdated = await ExecuteNonQueryAsync(
+                connection,
+                transaction,
+                """
+                UPDATE dbo.Receipts
+                SET ReceiptStatus = @cancelled,
+                    IsCanceled = 1,
+                    DateSettled = @cancelledAt,
+                    ModifiedOn = GETDATE(),
+                    ModifiedOnUtc = @cancelledAt
+                WHERE ReceiptId = @receiptId
+                  AND ReceiptStatus = @pending
+                  AND IsCanceled = 0;
+                """,
+                [
+                    new("@cancelled", (int)ReceiptStatus.Cancelled),
+                    new("@cancelledAt", cancelledAt),
+                    new("@receiptId", receipt.ReceiptId),
+                    new("@pending", (int)ReceiptStatus.Pending)
+                ],
+                cancellationToken);
+            if (receiptUpdated != 1)
+                throw Error(409, "AlreadyCancelled", "This ticket has already been cancelled.", ticketNumber);
+
+            await transaction.CommitAsync(cancellationToken);
+            _logger.LogInformation(
+                "Virtual ticket cancellation completed. ReceiptId={ReceiptId} TicketNumber={TicketNumber} OriginalStatus={OriginalStatus} ResultingStatus={ResultingStatus} TerminalId={TerminalId} TerminalCode={TerminalCode} UserId={UserId} BranchId={BranchId} CancelReference={CancelReference} ConfirmationReference={ConfirmationReference} CancelledAtUtc={CancelledAtUtc} Reason={Reason}",
+                receipt.ReceiptId, ticketNumber, ReceiptStatus.Pending, ReceiptStatus.Cancelled,
+                identity.TerminalId, identity.TerminalCode, userId, identity.BranchId,
+                cancelReference, confirmationReference, cancelledAt, reason);
+
+            return new(
+                receipt.ReceiptId,
+                ticketNumber,
+                "Canceled",
+                AsUtcOffset(cancelledAt),
+                cancelReference);
+        }
+        catch (SqlException exception) when (exception.Number is 2601 or 2627)
+        {
+            await RollbackQuietlyAsync(transaction, cancellationToken);
+            throw Error(409, "AlreadyCancelled", "This ticket has already been cancelled.", ticketNumber);
+        }
+        catch
+        {
+            await RollbackQuietlyAsync(transaction, cancellationToken);
+            throw;
+        }
+    }
+
     private TicketPayoutLookupResponse ToLookup(PayoutReceipt receipt, int terminalBranchId)
     {
         var reason = TicketPayoutEligibility.GetCannotPayoutReason(
@@ -213,6 +330,7 @@ public sealed class TicketPayoutService
             receipt.Status,
             receipt.AllSelectionsSettled,
             receipt.AllSelectionsWon);
+        var cannotCancelReason = GetCannotCancelReason(receipt, terminalBranchId);
 
         return new(
             receipt.ReceiptId,
@@ -227,7 +345,35 @@ public sealed class TicketPayoutService
             reason is null,
             reason,
             receipt.PaidAt.HasValue ? AsUtcOffset(receipt.PaidAt.Value) : null,
-            receipt.PayoutReference);
+            receipt.PayoutReference,
+            cannotCancelReason is null,
+            cannotCancelReason);
+    }
+
+    private static string? GetCannotCancelReason(PayoutReceipt receipt, int terminalBranchId) =>
+        TicketCancellationEligibility.GetCannotCancelReason(
+            receipt.PaymentSource,
+            receipt.BranchId,
+            terminalBranchId,
+            receipt.IsCanceled,
+            receipt.Status,
+            receipt.NoSelectionsSettled,
+            receipt.EventStarted);
+
+    private static TicketPayoutException CancellationEligibilityError(string code, string ticketNumber)
+    {
+        var message = code switch
+        {
+            "AlreadyCancelled" => "This ticket has already been cancelled.",
+            "AlreadyPaid" => "This ticket has already been paid.",
+            "CannotCancelWonTicket" => "Winning tickets cannot be cancelled.",
+            "CannotCancelSettledTicket" => "Settled tickets cannot be cancelled.",
+            "EventStarted" => "The first event has already started.",
+            "WrongBranch" => "This ticket cannot be cancelled by this branch.",
+            "NotVirtualTicket" => "This is not a virtual-display ticket.",
+            _ => "This ticket cannot be cancelled."
+        };
+        return Error(409, code, message, ticketNumber);
     }
 
     private static TicketPayoutException EligibilityError(TicketPayoutLookupResponse response)
@@ -292,9 +438,17 @@ public sealed class TicketPayoutService
                      THEN CAST(1 AS bit) ELSE CAST(0 AS bit) END AS AllSelectionsSettled,
                 CASE WHEN COUNT(b.BetId) > 0
                        AND SUM(CASE WHEN b.GameBetStatus = 2 THEN 1 ELSE 0 END) = COUNT(b.BetId)
-                     THEN CAST(1 AS bit) ELSE CAST(0 AS bit) END AS AllSelectionsWon
+                     THEN CAST(1 AS bit) ELSE CAST(0 AS bit) END AS AllSelectionsWon,
+                CASE WHEN COUNT(b.BetId) > 0
+                       AND SUM(CASE WHEN b.GameBetStatus = 0 THEN 1 ELSE 0 END) = COUNT(b.BetId)
+                     THEN CAST(1 AS bit) ELSE CAST(0 AS bit) END AS NoSelectionsSettled,
+                CASE WHEN COUNT(b.BetId) = 0
+                       OR COUNT(m.BetServiceMatchNo) <> COUNT(b.BetId)
+                       OR MIN(m.StartTime) <= GETDATE()
+                     THEN CAST(1 AS bit) ELSE CAST(0 AS bit) END AS EventStarted
             FROM dbo.Receipts r{lockHint}
             LEFT JOIN dbo.Bets b ON b.RecieptId = r.ReceiptId
+            LEFT JOIN dbo.Matches m ON m.BetServiceMatchNo = b.MatchId
             WHERE UPPER(LTRIM(RTRIM(r.SerialCode))) = @ticketNumber
             GROUP BY
                 r.ReceiptId, r.SerialCode, r.CreatedOnUtc, r.ReceiptDate, r.Stake, r.TotalOdds,
@@ -322,6 +476,8 @@ public sealed class TicketPayoutService
             reader["PaymentSource"] is DBNull ? null : Convert.ToString(reader["PaymentSource"]),
             Convert.ToBoolean(reader["AllSelectionsSettled"]),
             Convert.ToBoolean(reader["AllSelectionsWon"]),
+            Convert.ToBoolean(reader["NoSelectionsSettled"]),
+            Convert.ToBoolean(reader["EventStarted"]),
             reader["TimePaid"] is DBNull ? null : Convert.ToDateTime(reader["TimePaid"]),
             reader["PaymentReference"] is DBNull ? null : Convert.ToString(reader["PaymentReference"]));
     }
@@ -415,6 +571,18 @@ public sealed class TicketPayoutService
     private static string CreatePayoutReference() =>
         $"VPO-{DateTime.UtcNow:yyyyMMdd}-{Guid.NewGuid():N}"[..21].ToUpperInvariant();
 
+    private static string CreateCancelReference() =>
+        $"VTC-{DateTime.UtcNow:yyyyMMdd}-{Guid.NewGuid():N}"[..21].ToUpperInvariant();
+
+    private static void ValidateOptionalText(string? value, int maxLength, string fieldName, string ticketNumber)
+    {
+        if (value?.Trim().Length > maxLength)
+            throw Error(400, "InvalidTicket", $"{fieldName} cannot exceed {maxLength} characters.", ticketNumber);
+    }
+
+    private static string? NormalizeOptionalText(string? value) =>
+        string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+
     private static TicketPayoutException Error(int status, string code, string message, string? ticket = null) =>
         new(status, code, message, ticket);
 
@@ -429,5 +597,6 @@ public sealed class TicketPayoutService
         long ReceiptId, string TicketNumber, DateTime PlacedAt, decimal Stake,
         decimal TotalOdds, decimal PossibleWin, decimal PayableAmount, ReceiptStatus Status,
         bool IsCanceled, int BranchId, string? PaymentSource, bool AllSelectionsSettled,
-        bool AllSelectionsWon, DateTime? PaidAt, string? PayoutReference);
+        bool AllSelectionsWon, bool NoSelectionsSettled, bool EventStarted,
+        DateTime? PaidAt, string? PayoutReference);
 }
