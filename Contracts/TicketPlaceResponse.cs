@@ -5,6 +5,7 @@ public sealed class TicketPlaceResponse
     public bool IsPlaced { get; set; }
     public int? ReceiptId { get; set; }
     public Guid? Serial { get; set; }
+    public string? TicketNumber { get; set; }
     public long? ActiveSetNo { get; set; }
     public List<PlacedBetResponse> Bets { get; set; } = [];
     public List<TicketValidationError> Errors { get; set; } = [];

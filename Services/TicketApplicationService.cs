@@ -137,6 +137,7 @@ public sealed class TicketApplicationService
         response.IsPlaced = true;
         response.ReceiptId = placeResult.ReceiptId;
         response.Serial = placeResult.Serial;
+        response.TicketNumber = placeResult.TicketNumber;
         response.Bets = placeResult.Bets;
         response.Checks["place"] = "placed";
 

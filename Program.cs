@@ -32,6 +32,7 @@ builder.Services.AddSingleton<IConfigureOptions<JwtBearerOptions>, VirtualTicket
 builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
     .AddJwtBearer();
 builder.Services.AddAuthorization();
+builder.Services.AddHttpContextAccessor();
 builder.Services.AddCors(options =>
 {
     options.AddPolicy(DisplayCorsPolicy, policy =>
@@ -51,6 +52,7 @@ builder.Services.AddSingleton<VirtualTicketDb>();
 builder.Services.AddSingleton<TerminalAuthDb>();
 builder.Services.AddSingleton<JwtTokenService>();
 builder.Services.AddScoped<TicketApplicationService>();
+builder.Services.AddScoped<TicketPayoutService>();
 builder.Services.AddScoped<StakeValidator>();
 builder.Services.AddScoped<AccountValidator>();
 builder.Services.AddScoped<OddsValidator>();

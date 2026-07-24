@@ -11,10 +11,14 @@ namespace VirtualTickets.Api.Controllers;
 public sealed class TicketsController : ControllerBase
 {
     private readonly TicketApplicationService _ticketApplicationService;
+    private readonly TicketPayoutService _ticketPayoutService;
 
-    public TicketsController(TicketApplicationService ticketApplicationService)
+    public TicketsController(
+        TicketApplicationService ticketApplicationService,
+        TicketPayoutService ticketPayoutService)
     {
         _ticketApplicationService = ticketApplicationService;
+        _ticketPayoutService = ticketPayoutService;
     }
 
     [HttpPost("validate")]
@@ -33,5 +37,37 @@ public sealed class TicketsController : ControllerBase
     {
         var response = await _ticketApplicationService.PlaceAsync(request, cancellationToken);
         return Ok(response);
+    }
+
+    [HttpPost("payout/lookup")]
+    public async Task<ActionResult<TicketPayoutLookupResponse>> LookupPayout(
+        [FromBody] TicketPayoutLookupRequest request,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            return Ok(await _ticketPayoutService.LookupAsync(request, cancellationToken));
+        }
+        catch (TicketPayoutException exception)
+        {
+            return StatusCode(exception.StatusCode, new TicketPayoutError(
+                exception.Code, exception.Message, exception.TicketNumber));
+        }
+    }
+
+    [HttpPost("payout")]
+    public async Task<ActionResult<TicketPayoutResponse>> Payout(
+        [FromBody] TicketPayoutRequest request,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            return Ok(await _ticketPayoutService.PayoutAsync(request, cancellationToken));
+        }
+        catch (TicketPayoutException exception)
+        {
+            return StatusCode(exception.StatusCode, new TicketPayoutError(
+                exception.Code, exception.Message, exception.TicketNumber));
+        }
     }
 }
