@@ -444,7 +444,7 @@ public sealed class TicketPayoutService
                      THEN CAST(1 AS bit) ELSE CAST(0 AS bit) END AS NoSelectionsSettled,
                 CASE WHEN COUNT(b.BetId) = 0
                        OR COUNT(m.BetServiceMatchNo) <> COUNT(b.BetId)
-                       OR MIN(m.StartTime) <= GETDATE()
+                       OR MIN(m.StartTime) <= SYSUTCDATETIME()
                      THEN CAST(1 AS bit) ELSE CAST(0 AS bit) END AS EventStarted
             FROM dbo.Receipts r{lockHint}
             LEFT JOIN dbo.Bets b ON b.RecieptId = r.ReceiptId
