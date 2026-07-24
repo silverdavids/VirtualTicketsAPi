@@ -115,7 +115,7 @@ public sealed class TicketPayoutService
                 INSERT INTO dbo.VirtualTicketPayouts
                 (
                     ReceiptId, TicketNumber, Amount, Currency, OriginalReceiptStatus,
-                    ResultingReceiptStatus, TerminalId, TerminalCode, PaidByUserId, BranchId,
+                   ResultingReceiptStatus, TerminalId, TerminalCode, UserId, BranchId,
                     PayoutReference, ConfirmationReference, PaidAtUtc
                 )
                 VALUES
