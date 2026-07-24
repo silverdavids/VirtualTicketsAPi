@@ -19,7 +19,9 @@ public sealed record TicketPayoutLookupResponse(
     bool CanPayout,
     string? CannotPayoutReason,
     DateTimeOffset? PaidAt,
-    string? PayoutReference);
+    string? PayoutReference,
+    bool CanCancel,
+    string? CannotCancelReason);
 
 public sealed record TicketPayoutResponse(
     long ReceiptId,

@@ -70,4 +70,20 @@ public sealed class TicketsController : ControllerBase
                 exception.Code, exception.Message, exception.TicketNumber));
         }
     }
+
+    [HttpPost("cancel")]
+    public async Task<ActionResult<TicketCancelResponse>> Cancel(
+        [FromBody] TicketCancelRequest request,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            return Ok(await _ticketPayoutService.CancelAsync(request, cancellationToken));
+        }
+        catch (TicketPayoutException exception)
+        {
+            return StatusCode(exception.StatusCode, new TicketPayoutError(
+                exception.Code, exception.Message, exception.TicketNumber));
+        }
+    }
 }
