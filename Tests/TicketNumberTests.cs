@@ -11,17 +11,23 @@ public sealed class TicketNumberTests
         var value = TicketNumber.Generate();
 
         Assert.True(TicketNumber.IsValid(value));
-        Assert.StartsWith("VT-", value);
-        Assert.Equal(19, value.Length);
+        Assert.Equal(12, value.Length);
+        Assert.All(value, character => Assert.InRange(character, '0', '9'));
     }
 
     [Fact]
-    public void Normalize_removes_spaces_and_uppercases()
+    public void Normalize_removes_spaces_from_numeric_ticket()
     {
-        var value = TicketNumber.Normalize(" vt-2345 6789 abcd efgh ");
+        var value = TicketNumber.Normalize(" 2126 9700 7925 ");
 
-        Assert.Equal("VT-23456789ABCDEFGH", value);
+        Assert.Equal("212697007925", value);
         Assert.True(TicketNumber.IsValid(value));
+    }
+
+    [Fact]
+    public void Existing_legacy_ticket_numbers_remain_valid()
+    {
+        Assert.True(TicketNumber.IsValid("VT-23456789ABCDEFGH"));
     }
 
     [Fact]
@@ -38,6 +44,7 @@ public sealed class TicketNumberTests
     [InlineData(null)]
     [InlineData("")]
     [InlineData("123")]
+    [InlineData("21269700792A")]
     [InlineData("VT-OOOOOOOOOOOOOOOO")]
     [InlineData("VT-23456789ABCDEFGI")]
     public void IsValid_rejects_malformed_values(string? value)

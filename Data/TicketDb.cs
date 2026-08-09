@@ -208,6 +208,7 @@ public sealed class TicketDb
             var errors = new List<TicketValidationError>();
             int? branchId;
             string? receiptUserId;
+            string? shopDisplayName;
             if (terminalIdentity is not null)
             {
                 var ownership = await ResolveTerminalTicketOwnershipAsync(
@@ -224,11 +225,13 @@ public sealed class TicketDb
 
                 branchId = ownership.BranchId;
                 receiptUserId = ownership.UserId;
+                shopDisplayName = ownership.ShopDisplayName;
             }
             else
             {
                 branchId = await ResolveBranchIdAsync(connection, transaction, request, cancellationToken);
                 receiptUserId = request.UserId;
+                shopDisplayName = null;
             }
 
             if (!branchId.HasValue && terminalIdentity is null)
@@ -293,7 +296,12 @@ public sealed class TicketDb
             }
 
             await transaction.CommitAsync(cancellationToken);
-                return TicketPlaceResult.Placed(receiptId, serial, ticketNumber, placedBets);
+                return TicketPlaceResult.Placed(
+                    receiptId,
+                    serial,
+                    ticketNumber,
+                    shopDisplayName,
+                    placedBets);
             }
             catch (SqlException exception) when (IsTicketNumberCollision(exception) && attempt < 5)
             {
@@ -460,6 +468,8 @@ public sealed class TicketDb
         const string sql = """
             SELECT
                 t.BranchId,
+                b.BranchName,
+                t.TerminalCode,
                 b.TicketAccountUserId,
                 a.UserId AS VerifiedAccountUserId
             FROM dbo.Terminals t
@@ -482,6 +492,8 @@ public sealed class TicketDb
         }
 
         var databaseBranchId = reader.GetInt32(reader.GetOrdinal("BranchId"));
+        var branchName = reader.GetString(reader.GetOrdinal("BranchName")).Trim();
+        var terminalCode = reader.GetString(reader.GetOrdinal("TerminalCode")).Trim();
         var configuredUserId = reader.IsDBNull(reader.GetOrdinal("TicketAccountUserId"))
             ? null
             : reader.GetString(reader.GetOrdinal("TicketAccountUserId"));
@@ -489,7 +501,8 @@ public sealed class TicketDb
             ? null
             : reader.GetString(reader.GetOrdinal("VerifiedAccountUserId"));
 
-        return TicketOwnershipPolicy.Resolve(identity.BranchId, databaseBranchId, configuredUserId, verifiedUserId);
+        return TicketOwnershipPolicy.Resolve(identity.BranchId, databaseBranchId, configuredUserId, verifiedUserId)
+            .WithShopDisplayName($"{branchName}-{terminalCode}");
     }
 
     private async Task<long?> ResolveMatchIdAsync(
@@ -869,12 +882,18 @@ public sealed record TicketPlaceResult(
     int? ReceiptId,
     Guid? Serial,
     string? TicketNumber,
+    string? ShopDisplayName,
     List<PlacedBetResponse> Bets,
     List<TicketValidationError> Errors)
 {
-    public static TicketPlaceResult Placed(int receiptId, Guid serial, string ticketNumber, List<PlacedBetResponse> bets) =>
-        new(true, receiptId, serial, ticketNumber, bets, []);
+    public static TicketPlaceResult Placed(
+        int receiptId,
+        Guid serial,
+        string ticketNumber,
+        string? shopDisplayName,
+        List<PlacedBetResponse> bets) =>
+        new(true, receiptId, serial, ticketNumber, shopDisplayName, bets, []);
 
     public static TicketPlaceResult Failed(List<TicketValidationError> errors) =>
-        new(false, null, null, null, [], errors);
+        new(false, null, null, null, null, [], errors);
 }
