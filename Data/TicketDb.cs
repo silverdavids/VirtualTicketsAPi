@@ -271,7 +271,7 @@ public sealed class TicketDb
 
             var serial = Guid.NewGuid();
             var ticketNumber = TicketNumber.Generate();
-            var receiptId = await InsertReceiptAsync(
+            var insertedReceipt = await InsertReceiptAsync(
                 connection,
                 transaction,
                 request,
@@ -282,6 +282,7 @@ public sealed class TicketDb
                 serial,
                 ticketNumber,
                 cancellationToken);
+            var receiptId = insertedReceipt.ReceiptId;
 
             var placedBets = new List<PlacedBetResponse>();
             foreach (var resolvedSelection in resolvedSelections)
@@ -301,6 +302,7 @@ public sealed class TicketDb
                     serial,
                     ticketNumber,
                     shopDisplayName,
+                    insertedReceipt.BookedAtUtc,
                     placedBets);
             }
             catch (SqlException exception) when (IsTicketNumberCollision(exception) && attempt < 5)
@@ -578,7 +580,7 @@ public sealed class TicketDb
             cancellationToken);
     }
 
-    private async Task<int> InsertReceiptAsync(
+    private async Task<InsertedReceipt> InsertReceiptAsync(
         SqlConnection connection,
         SqlTransaction transaction,
         TicketValidateRequest request,
@@ -594,7 +596,7 @@ public sealed class TicketDb
         var now = DateTime.Now;
         var utcNow = DateTime.UtcNow;
 
-        return await ExecuteScalarAsync<int>(
+        return await ExecuteInsertedReceiptAsync(
             connection,
             transaction,
             """
@@ -623,7 +625,7 @@ public sealed class TicketDb
                 ModifiedOn,
                 ModifiedOnUtc
             )
-            OUTPUT INSERTED.ReceiptId
+            OUTPUT INSERTED.ReceiptId, INSERTED.CreatedOnUtc
             VALUES
             (
                 @userId,
@@ -749,6 +751,30 @@ public sealed class TicketDb
         }
 
         return (T)Convert.ChangeType(result, Nullable.GetUnderlyingType(typeof(T)) ?? typeof(T));
+    }
+
+    private static async Task<InsertedReceipt> ExecuteInsertedReceiptAsync(
+        SqlConnection connection,
+        SqlTransaction transaction,
+        string sql,
+        IReadOnlyCollection<SqlParameter> parameters,
+        CancellationToken cancellationToken)
+    {
+        await using var command = new SqlCommand(sql, connection, transaction);
+        foreach (var parameter in parameters)
+        {
+            command.Parameters.Add(parameter);
+        }
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken))
+        {
+            throw new InvalidOperationException("Receipt insert did not return the persisted receipt timestamp.");
+        }
+
+        return new InsertedReceipt(
+            reader.GetInt32(reader.GetOrdinal("ReceiptId")),
+            DateTime.SpecifyKind(reader.GetDateTime(reader.GetOrdinal("CreatedOnUtc")), DateTimeKind.Utc));
     }
 
     private static async Task RollbackQuietlyAsync(SqlTransaction transaction, CancellationToken cancellationToken)
@@ -883,6 +909,7 @@ public sealed record TicketPlaceResult(
     Guid? Serial,
     string? TicketNumber,
     string? ShopDisplayName,
+    DateTime? BookedAtUtc,
     List<PlacedBetResponse> Bets,
     List<TicketValidationError> Errors)
 {
@@ -891,9 +918,12 @@ public sealed record TicketPlaceResult(
         Guid serial,
         string ticketNumber,
         string? shopDisplayName,
+        DateTime bookedAtUtc,
         List<PlacedBetResponse> bets) =>
-        new(true, receiptId, serial, ticketNumber, shopDisplayName, bets, []);
+        new(true, receiptId, serial, ticketNumber, shopDisplayName, bookedAtUtc, bets, []);
 
     public static TicketPlaceResult Failed(List<TicketValidationError> errors) =>
-        new(false, null, null, null, null, [], errors);
+        new(false, null, null, null, null, null, [], errors);
 }
+
+public sealed record InsertedReceipt(int ReceiptId, DateTime BookedAtUtc);

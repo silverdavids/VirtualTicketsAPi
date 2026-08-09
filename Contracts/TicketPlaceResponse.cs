@@ -7,6 +7,7 @@ public sealed class TicketPlaceResponse
     public Guid? Serial { get; set; }
     public string? TicketNumber { get; set; }
     public string? ShopDisplayName { get; set; }
+    public DateTime? BookedAtUtc { get; set; }
     public long? ActiveSetNo { get; set; }
     public List<PlacedBetResponse> Bets { get; set; } = [];
     public List<TicketValidationError> Errors { get; set; } = [];
