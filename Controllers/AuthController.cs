@@ -1,5 +1,4 @@
 using Microsoft.AspNetCore.Mvc;
-using Microsoft.Data.SqlClient;
 using VirtualTickets.Api.Auth;
 using VirtualTickets.Api.Contracts;
 using VirtualTickets.Api.Data;
@@ -72,7 +71,12 @@ public sealed class AuthController : ControllerBase
                     result.FailureCode,
                     result.FailureMessage);
 
-                return Unauthorized(CreateAuthenticationFailureResponse(result));
+                var failureResponse = CreateAuthenticationFailureResponse(result);
+                return result.FailureCode is TerminalAuthenticationFailureCode.TerminalInactive
+                    or TerminalAuthenticationFailureCode.InvalidTerminalType
+                    or TerminalAuthenticationFailureCode.BranchRequired
+                    ? StatusCode(StatusCodes.Status403Forbidden, failureResponse)
+                    : Unauthorized(failureResponse);
             }
 
             var issuedToken = _jwtTokenService.Issue(result.Terminal);
@@ -95,7 +99,7 @@ public sealed class AuthController : ControllerBase
                 }
             });
         }
-        catch (Exception exception) when (exception is SqlException or InvalidOperationException)
+        catch (Exception exception) when (exception is not OperationCanceledException)
         {
             _logger.LogError(exception, "Display terminal authentication failed.");
             if (_environment.IsDevelopment())

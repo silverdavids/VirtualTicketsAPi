@@ -196,6 +196,7 @@ public sealed class TicketDb
     public async Task<TicketPlaceResult> PlaceTicketAsync(
         TicketValidateRequest request,
         long activeSetNo,
+        TerminalTicketIdentity? terminalIdentity,
         CancellationToken cancellationToken)
     {
         for (var attempt = 1; attempt <= 5; attempt++)
@@ -205,8 +206,32 @@ public sealed class TicketDb
             try
             {
             var errors = new List<TicketValidationError>();
-            var branchId = await ResolveBranchIdAsync(connection, transaction, request, cancellationToken);
-            if (!branchId.HasValue)
+            int? branchId;
+            string? receiptUserId;
+            if (terminalIdentity is not null)
+            {
+                var ownership = await ResolveTerminalTicketOwnershipAsync(
+                    connection, transaction, terminalIdentity, cancellationToken);
+                if (!ownership.IsResolved)
+                {
+                    errors.Add(new TicketValidationError
+                    {
+                        Code = ownership.ErrorCode!,
+                        Field = "branch",
+                        Message = ownership.ErrorMessage!
+                    });
+                }
+
+                branchId = ownership.BranchId;
+                receiptUserId = ownership.UserId;
+            }
+            else
+            {
+                branchId = await ResolveBranchIdAsync(connection, transaction, request, cancellationToken);
+                receiptUserId = request.UserId;
+            }
+
+            if (!branchId.HasValue && terminalIdentity is null)
             {
                 errors.Add(new TicketValidationError
                 {
@@ -249,6 +274,8 @@ public sealed class TicketDb
                 request,
                 activeSetNo,
                 branchId!.Value,
+                receiptUserId,
+                terminalIdentity is null ? request.Source : "VirtualDisplay",
                 serial,
                 ticketNumber,
                 cancellationToken);
@@ -424,6 +451,47 @@ public sealed class TicketDb
             cancellationToken);
     }
 
+    private static async Task<TerminalTicketOwnership> ResolveTerminalTicketOwnershipAsync(
+        SqlConnection connection,
+        SqlTransaction transaction,
+        TerminalTicketIdentity identity,
+        CancellationToken cancellationToken)
+    {
+        const string sql = """
+            SELECT
+                t.BranchId,
+                b.TicketAccountUserId,
+                a.UserId AS VerifiedAccountUserId
+            FROM dbo.Terminals t
+            INNER JOIN dbo.Branches b ON b.BranchId = t.BranchId
+            LEFT JOIN dbo.Accounts a
+                ON a.UserId = b.TicketAccountUserId
+               AND a.BranchId = t.BranchId
+            WHERE t.TerminalId = @terminalId
+              AND UPPER(LTRIM(RTRIM(t.TerminalCode))) = UPPER(@terminalCode)
+              AND t.IsActive = 1
+            """;
+
+        await using var command = new SqlCommand(sql, connection, transaction);
+        command.Parameters.Add(new SqlParameter("@terminalId", identity.TerminalId));
+        command.Parameters.Add(new SqlParameter("@terminalCode", identity.TerminalCode));
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken))
+        {
+            return TerminalTicketOwnership.InvalidTerminal();
+        }
+
+        var databaseBranchId = reader.GetInt32(reader.GetOrdinal("BranchId"));
+        var configuredUserId = reader.IsDBNull(reader.GetOrdinal("TicketAccountUserId"))
+            ? null
+            : reader.GetString(reader.GetOrdinal("TicketAccountUserId"));
+        var verifiedUserId = reader.IsDBNull(reader.GetOrdinal("VerifiedAccountUserId"))
+            ? null
+            : reader.GetString(reader.GetOrdinal("VerifiedAccountUserId"));
+
+        return TicketOwnershipPolicy.Resolve(identity.BranchId, databaseBranchId, configuredUserId, verifiedUserId);
+    }
+
     private async Task<long?> ResolveMatchIdAsync(
         SqlConnection connection,
         SqlTransaction transaction,
@@ -503,6 +571,8 @@ public sealed class TicketDb
         TicketValidateRequest request,
         long activeSetNo,
         int branchId,
+        string? receiptUserId,
+        string? paymentSource,
         Guid serial,
         string ticketNumber,
         CancellationToken cancellationToken)
@@ -568,7 +638,7 @@ public sealed class TicketDb
             )
             """,
             [
-                new("@userId", (object?)request.UserId ?? DBNull.Value),
+                new("@userId", (object?)receiptUserId ?? DBNull.Value),
                 new("@receiptDate", now),
                 new("@stake", request.Stake),
                 new("@totalOdds", totalOdds),
@@ -581,7 +651,7 @@ public sealed class TicketDb
                 new("@receiptStatus", (int)ReceiptStatus.Pending),
                 new("@createdOn", now),
                 new("@createdOnUtc", utcNow),
-                new("@paymentSource", (object?)request.Source ?? DBNull.Value)
+                new("@paymentSource", (object?)paymentSource ?? DBNull.Value)
             ],
             cancellationToken);
     }
