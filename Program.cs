@@ -11,6 +11,10 @@ DotEnv.Load(Path.Combine(Directory.GetCurrentDirectory(), ".env"));
 var builder = WebApplication.CreateBuilder(args);
 const string DisplayCorsPolicy = "DisplayCors";
 
+builder.Logging.ClearProviders();
+builder.Logging.AddConsole();
+builder.Logging.AddDebug();
+
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();

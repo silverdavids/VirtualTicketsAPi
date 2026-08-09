@@ -61,9 +61,9 @@ Terminal types:
 ```
 
 The API looks up `dbo.Terminals` by `TerminalCode`, requires `IsActive = 1`,
-requires `TerminalType = 1`, verifies `SecretHash` with the ASP.NET Identity
-password hasher, updates `LastSeenAt`, `LastVersion`, and optionally
-`IpAddress`, then issues a short-lived JWT.
+allows display terminal types `1` and `2`, requires an assigned branch, verifies
+`SecretHash` with the ASP.NET Identity password hasher, updates `LastSeenAt`,
+`LastVersion`, and optionally `IpAddress`, then issues a short-lived JWT.
 
 JWT claims should include:
 

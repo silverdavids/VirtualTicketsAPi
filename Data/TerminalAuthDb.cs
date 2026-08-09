@@ -8,6 +8,7 @@ namespace VirtualTickets.Api.Data;
 public sealed class TerminalAuthDb
 {
     private const byte VirtualDisplayTerminalType = 1;
+    private const byte CashierDisplayTerminalType = 2;
     private readonly string? _connectionString;
     private readonly PasswordHasher<TerminalAuthRecord> _passwordHasher;
     private readonly PasswordHasherOptions _passwordHasherOptions;
@@ -60,14 +61,13 @@ public sealed class TerminalAuthDb
             return TerminalAuthenticationResult.Failed(TerminalAuthenticationFailureCode.TerminalInactive, "Terminal inactive.");
         }
 
-        if (terminal.TerminalType != VirtualDisplayTerminalType)
+        if (terminal.TerminalType is not VirtualDisplayTerminalType and not CashierDisplayTerminalType)
         {
             _logger.LogWarning(
-                "[terminal-auth] Terminal {TerminalId} rejected because TerminalType {TerminalType} is not Virtual Display ({VirtualDisplayTerminalType}).",
+                "[terminal-auth] Terminal {TerminalId} rejected because TerminalType {TerminalType} is not an authenticated display type.",
                 terminal.TerminalId,
-                terminal.TerminalType,
-                VirtualDisplayTerminalType);
-            return TerminalAuthenticationResult.Failed(TerminalAuthenticationFailureCode.InvalidTerminalType, "Terminal is not a virtual display.");
+                terminal.TerminalType);
+            return TerminalAuthenticationResult.Failed(TerminalAuthenticationFailureCode.InvalidTerminalType, "Terminal is not an authenticated display.");
         }
 
         if (string.IsNullOrWhiteSpace(terminal.SecretHash))
@@ -86,6 +86,12 @@ public sealed class TerminalAuthDb
         if (verificationResult == PasswordVerificationResult.Failed)
         {
             return TerminalAuthenticationResult.Failed(TerminalAuthenticationFailureCode.InvalidSecret, "Invalid secret.");
+        }
+
+        if (terminal.BranchId is null)
+        {
+            _logger.LogWarning("[terminal-auth] Terminal {TerminalId} rejected because it has no assigned branch.", terminal.TerminalId);
+            return TerminalAuthenticationResult.Failed(TerminalAuthenticationFailureCode.BranchRequired, "Terminal must be assigned to a branch.");
         }
 
         await UpdateTerminalMetadataAsync(connection, terminal.TerminalId, version, ipAddress, cancellationToken);
@@ -126,7 +132,7 @@ public sealed class TerminalAuthDb
             reader.GetInt32(reader.GetOrdinal("TerminalId")),
             reader.GetString(reader.GetOrdinal("TerminalCode")),
             reader.IsDBNull(reader.GetOrdinal("TerminalName")) ? string.Empty : reader.GetString(reader.GetOrdinal("TerminalName")),
-            reader.GetInt32(reader.GetOrdinal("BranchId")),
+            reader.IsDBNull(reader.GetOrdinal("BranchId")) ? null : reader.GetInt32(reader.GetOrdinal("BranchId")),
             reader.GetByte(reader.GetOrdinal("TerminalType")),
             reader.GetBoolean(reader.GetOrdinal("IsActive")),
             reader.IsDBNull(reader.GetOrdinal("SecretHash")) ? null : reader.GetString(reader.GetOrdinal("SecretHash")));
@@ -184,12 +190,12 @@ public sealed record TerminalAuthRecord(
     int TerminalId,
     string TerminalCode,
     string TerminalName,
-    int BranchId,
+    int? BranchId,
     byte TerminalType,
     bool IsActive,
     string? SecretHash)
 {
-    public TerminalIdentity ToIdentity() => new(TerminalId, TerminalCode, TerminalName, BranchId, TerminalType);
+    public TerminalIdentity ToIdentity() => new(TerminalId, TerminalCode, TerminalName, BranchId!.Value, TerminalType);
 }
 
 public sealed record TerminalIdentity(
@@ -205,6 +211,7 @@ public enum TerminalAuthenticationFailureCode
     TerminalNotFound,
     TerminalInactive,
     InvalidTerminalType,
+    BranchRequired,
     SecretHashMissing,
     InvalidSecret
 }

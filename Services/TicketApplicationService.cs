@@ -1,6 +1,7 @@
 using VirtualTickets.Api.Contracts;
 using VirtualTickets.Api.Data;
 using VirtualTickets.Api.Services.Validation;
+using System.Security.Claims;
 
 namespace VirtualTickets.Api.Services;
 
@@ -11,19 +12,22 @@ public sealed class TicketApplicationService
     private readonly AccountValidator _accountValidator;
     private readonly OddsValidator _oddsValidator;
     private readonly SetValidator _setValidator;
+    private readonly IHttpContextAccessor _httpContextAccessor;
 
     public TicketApplicationService(
         TicketDb ticketDb,
         StakeValidator stakeValidator,
         AccountValidator accountValidator,
         OddsValidator oddsValidator,
-        SetValidator setValidator)
+        SetValidator setValidator,
+        IHttpContextAccessor httpContextAccessor)
     {
         _ticketDb = ticketDb;
         _stakeValidator = stakeValidator;
         _accountValidator = accountValidator;
         _oddsValidator = oddsValidator;
         _setValidator = setValidator;
+        _httpContextAccessor = httpContextAccessor;
     }
 
     public async Task<TicketValidateResponse> ValidateAsync(TicketValidateRequest request, CancellationToken cancellationToken)
@@ -79,7 +83,10 @@ public sealed class TicketApplicationService
         }
 
         await _setValidator.ValidateAsync(response, cancellationToken);
-        await _accountValidator.ValidateAsync(request, response, cancellationToken);
+        if (ResolveTerminalIdentity() is null)
+        {
+            await _accountValidator.ValidateAsync(request, response, cancellationToken);
+        }
         await _oddsValidator.ValidateAsync(request, response, cancellationToken);
 
         return response;
@@ -126,7 +133,11 @@ public sealed class TicketApplicationService
             return response;
         }
 
-        var placeResult = await _ticketDb.PlaceTicketAsync(request, validation.ActiveSetNo.Value, cancellationToken);
+        var placeResult = await _ticketDb.PlaceTicketAsync(
+            request,
+            validation.ActiveSetNo.Value,
+            ResolveTerminalIdentity(),
+            cancellationToken);
         if (!placeResult.IsPlaced)
         {
             response.Errors.AddRange(placeResult.Errors);
@@ -142,6 +153,21 @@ public sealed class TicketApplicationService
         response.Checks["place"] = "placed";
 
         return response;
+    }
+
+    private TerminalTicketIdentity? ResolveTerminalIdentity()
+    {
+        var user = _httpContextAccessor.HttpContext?.User;
+        if (user?.FindFirstValue("auth_type") != "display_terminal")
+        {
+            return null;
+        }
+
+        return int.TryParse(user.FindFirstValue("terminal_id"), out var terminalId)
+            && int.TryParse(user.FindFirstValue("branch_id"), out var branchId)
+            && !string.IsNullOrWhiteSpace(user.FindFirstValue("terminal_code"))
+            ? new TerminalTicketIdentity(terminalId, user.FindFirstValue("terminal_code")!, branchId)
+            : throw new InvalidOperationException("Authenticated display terminal claims are incomplete.");
     }
 
     private static void ValidateSelections(TicketValidateRequest request, TicketValidateResponse response)
