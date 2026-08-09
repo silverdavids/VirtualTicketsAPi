@@ -97,6 +97,7 @@ public sealed class VirtualTicketDb
                 r.ReceiptId,
                 r.SerialCode,
                 r.ReceiptDate,
+                r.CreatedOnUtc AS BookedAtUtc,
                 r.Stake,
                 r.TotalOdds,
                 ROUND(r.Stake * r.TotalOdds, 2) AS PossibleWin,
@@ -148,6 +149,9 @@ public sealed class VirtualTicketDb
             ReceiptId = GetRequiredInt64(reader, "ReceiptId"),
             SerialCode = GetNullableString(reader, "SerialCode"),
             ReceiptDate = GetNullableDateTime(reader, "ReceiptDate"),
+            BookedAtUtc = GetNullableDateTime(reader, "BookedAtUtc") is { } bookedAtUtc
+                ? DateTime.SpecifyKind(bookedAtUtc, DateTimeKind.Utc)
+                : null,
             Stake = GetNullableDecimal(reader, "Stake"),
             TotalOdds = GetNullableDecimal(reader, "TotalOdds"),
             PossibleWin = GetNullableDecimal(reader, "PossibleWin"),

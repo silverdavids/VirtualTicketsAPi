@@ -9,6 +9,7 @@ public sealed record VirtualTicketReceiptDetail
     public long ReceiptId { get; init; }
     public string? SerialCode { get; init; }
     public DateTime? ReceiptDate { get; init; }
+    public DateTime? BookedAtUtc { get; init; }
     public decimal? Stake { get; init; }
     public decimal? TotalOdds { get; init; }
     public decimal? PossibleWin { get; init; }
