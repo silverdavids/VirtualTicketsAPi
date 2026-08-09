@@ -49,4 +49,4 @@ coverage/
 *.coveragexml
 
 # Generated artifacts
-artifacts/
+artifacts/livedocker-compose.txt
