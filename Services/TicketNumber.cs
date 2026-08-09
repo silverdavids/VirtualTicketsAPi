@@ -4,21 +4,15 @@ namespace VirtualTickets.Api.Services;
 
 public static class TicketNumber
 {
-    private const string Alphabet = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ";
-    public const int RandomLength = 16;
+    private const string LegacyAlphabet = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ";
+    public const int NumericLength = 12;
 
     public static string Generate()
     {
-        Span<byte> bytes = stackalloc byte[RandomLength];
-        RandomNumberGenerator.Fill(bytes);
-        Span<char> result = stackalloc char[3 + RandomLength];
-        result[0] = 'V';
-        result[1] = 'T';
-        result[2] = '-';
-
-        for (var index = 0; index < bytes.Length; index++)
+        Span<char> result = stackalloc char[NumericLength];
+        for (var index = 0; index < result.Length; index++)
         {
-            result[index + 3] = Alphabet[bytes[index] % Alphabet.Length];
+            result[index] = (char)('0' + RandomNumberGenerator.GetInt32(10));
         }
 
         return new string(result);
@@ -38,8 +32,13 @@ public static class TicketNumber
     public static bool IsValid(string? value)
     {
         var normalized = Normalize(value);
-        return normalized is { Length: 19 }
-            && normalized.StartsWith("VT-", StringComparison.Ordinal)
-            && normalized.AsSpan(3).IndexOfAnyExcept(Alphabet) < 0;
+        return (normalized is { Length: NumericLength }
+            && normalized.All(char.IsAsciiDigit))
+            || IsValidLegacy(normalized);
     }
+
+    private static bool IsValidLegacy(string? value) =>
+        value is { Length: 19 }
+        && value.StartsWith("VT-", StringComparison.Ordinal)
+        && value.AsSpan(3).IndexOfAnyExcept(LegacyAlphabet) < 0;
 }

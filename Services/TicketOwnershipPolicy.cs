@@ -6,20 +6,26 @@ public sealed record TerminalTicketOwnership(
     bool IsResolved,
     int? BranchId,
     string? UserId,
+    string? ShopDisplayName,
     string? ErrorCode,
     string? ErrorMessage)
 {
     public static TerminalTicketOwnership Resolved(int branchId, string userId) =>
-        new(true, branchId, userId, null, null);
+        new(true, branchId, userId, null, null, null);
 
     public static TerminalTicketOwnership InvalidTerminal() =>
-        new(false, null, null, "terminal_identity_invalid", "Authenticated terminal is no longer valid.");
+        new(false, null, null, null, "terminal_identity_invalid", "Authenticated terminal is no longer valid.");
 
     public static TerminalTicketOwnership ConfigurationMissing() =>
-        new(false, null, null, "shop_ticket_account_not_configured", "Shop has no ticket sales account configured.");
+        new(false, null, null, null, "shop_ticket_account_not_configured", "Shop has no ticket sales account configured.");
 
     public static TerminalTicketOwnership ConfigurationInvalid() =>
-        new(false, null, null, "shop_ticket_account_invalid", "Shop ticket sales account is invalid or belongs to another branch.");
+        new(false, null, null, null, "shop_ticket_account_invalid", "Shop ticket sales account is invalid or belongs to another branch.");
+
+    public TerminalTicketOwnership WithShopDisplayName(string shopDisplayName) => this with
+    {
+        ShopDisplayName = shopDisplayName
+    };
 }
 
 public static class TicketOwnershipPolicy
