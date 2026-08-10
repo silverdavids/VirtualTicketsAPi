@@ -3,6 +3,8 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.Data.SqlClient;
 using VirtualTickets.Api.Contracts;
 using VirtualTickets.Api.Data;
+using VirtualTickets.Api.Services;
+using System.Security.Claims;
 
 namespace VirtualTickets.Api.Controllers;
 
@@ -33,12 +35,20 @@ public sealed class VirtualTicketsController : ControllerBase
     {
         try
         {
+            var scope = await ResolveTerminalScopeAsync(cancellationToken);
+            if (IsDisplayTerminal() && scope is null)
+            {
+                return Forbid();
+            }
+
+            var queryScope = VirtualTicketAccessScopePolicy.Apply(scope, userId, branchId);
+
             var tickets = await _virtualTicketDb.GetTicketsAsync(
                 from,
                 to,
                 status,
-                userId,
-                branchId,
+                queryScope.UserId,
+                queryScope.BranchId,
                 cancellationToken);
 
             return Ok(tickets);
@@ -60,7 +70,14 @@ public sealed class VirtualTicketsController : ControllerBase
     {
         try
         {
-            var details = await _virtualTicketDb.GetTicketDetailsAsync(receiptId, cancellationToken);
+            var scope = await ResolveTerminalScopeAsync(cancellationToken);
+            if (IsDisplayTerminal() && scope is null)
+            {
+                return Forbid();
+            }
+
+            var details = await _virtualTicketDb.GetTicketDetailsAsync(
+                receiptId, scope?.UserId, scope?.BranchId, cancellationToken);
             return details is null
                 ? NotFound()
                 : Ok(details);
@@ -73,5 +90,28 @@ public sealed class VirtualTicketsController : ControllerBase
                 message = "Virtual ticket details could not be loaded."
             });
         }
+    }
+
+    private bool IsDisplayTerminal() =>
+        User.FindFirstValue("auth_type") == "display_terminal";
+
+    private async Task<TerminalVirtualTicketScope?> ResolveTerminalScopeAsync(
+        CancellationToken cancellationToken)
+    {
+        if (!IsDisplayTerminal())
+        {
+            return null;
+        }
+
+        if (!int.TryParse(User.FindFirstValue("terminal_id"), out var terminalId)
+            || !int.TryParse(User.FindFirstValue("branch_id"), out var branchId)
+            || string.IsNullOrWhiteSpace(User.FindFirstValue("terminal_code")))
+        {
+            return null;
+        }
+
+        return await _virtualTicketDb.ResolveTerminalScopeAsync(
+            new TerminalTicketIdentity(terminalId, User.FindFirstValue("terminal_code")!, branchId),
+            cancellationToken);
     }
 }

@@ -101,7 +101,14 @@ public sealed class TicketApplicationService
         {
             await _accountValidator.ValidateAsync(request, response, cancellationToken);
         }
-        await _oddsValidator.ValidateAsync(request, response, cancellationToken);
+        if (terminalIdentity is null)
+        {
+            await _oddsValidator.ValidateAsync(request, response, cancellationToken);
+        }
+        else
+        {
+            response.Checks["odds"] = "deferred_to_authoritative_placement_transaction";
+        }
 
         return response;
     }
@@ -174,7 +181,7 @@ public sealed class TicketApplicationService
 
         response.IsPlaced = true;
         response.ReceiptId = placeResult.ReceiptId;
-        response.Serial = placeResult.Serial;
+        response.InternalSerial = placeResult.Serial;
         response.TicketNumber = placeResult.TicketNumber;
         response.ShopDisplayName = placeResult.ShopDisplayName;
         response.BookedAtUtc = placeResult.BookedAtUtc;
@@ -188,7 +195,7 @@ public sealed class TicketApplicationService
     {
         IsPlaced = true,
         ReceiptId = existing.ReceiptId,
-        Serial = existing.Serial,
+        InternalSerial = existing.Serial,
         TicketNumber = existing.TicketNumber,
         ShopDisplayName = existing.ShopDisplayName,
         BookedAtUtc = existing.BookedAtUtc,
@@ -196,6 +203,9 @@ public sealed class TicketApplicationService
         Bets = existing.Bets,
         Checks = new Dictionary<string, string> { ["place"] = "idempotent_retry" }
     };
+
+    public static bool IsConflictError(string code) => code is
+        "board_changed" or "board_expired" or "selection_not_available" or "odds_changed";
 
     private TerminalTicketIdentity? ResolveTerminalIdentity()
     {

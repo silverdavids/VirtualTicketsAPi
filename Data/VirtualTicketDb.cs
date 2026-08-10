@@ -1,6 +1,7 @@
 using System.Data;
 using Microsoft.Data.SqlClient;
 using VirtualTickets.Api.Contracts;
+using VirtualTickets.Api.Services;
 
 namespace VirtualTickets.Api.Data;
 
@@ -86,8 +87,49 @@ public sealed class VirtualTicketDb
         return tickets;
     }
 
+    public async Task<TerminalVirtualTicketScope?> ResolveTerminalScopeAsync(
+        TerminalTicketIdentity identity,
+        CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenConnectionAsync(cancellationToken);
+        const string sql = """
+            SELECT t.BranchId, b.TicketAccountUserId, a.UserId AS VerifiedUserId
+            FROM dbo.Terminals t
+            INNER JOIN dbo.Branches b ON b.BranchId = t.BranchId
+            LEFT JOIN dbo.Accounts a
+              ON a.UserId = b.TicketAccountUserId
+             AND a.BranchId = t.BranchId
+            WHERE t.TerminalId = @TerminalId
+              AND UPPER(LTRIM(RTRIM(t.TerminalCode))) = UPPER(@TerminalCode)
+              AND t.IsActive = 1;
+            """;
+        await using var command = new SqlCommand(sql, connection);
+        AddParameter(command, "@TerminalId", SqlDbType.Int, identity.TerminalId);
+        AddParameter(command, "@TerminalCode", SqlDbType.NVarChar, identity.TerminalCode);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken))
+        {
+            return null;
+        }
+
+        var databaseBranchId = GetNullableInt32(reader, "BranchId");
+        var configuredUserId = GetNullableString(reader, "TicketAccountUserId");
+        var verifiedUserId = GetNullableString(reader, "VerifiedUserId");
+        if (!databaseBranchId.HasValue
+            || databaseBranchId.Value != identity.BranchId
+            || string.IsNullOrWhiteSpace(configuredUserId)
+            || !string.Equals(configuredUserId, verifiedUserId, StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+
+        return new TerminalVirtualTicketScope(databaseBranchId.Value, verifiedUserId!);
+    }
+
     public async Task<VirtualTicketDetailsResponse?> GetTicketDetailsAsync(
         long receiptId,
+        string? userId,
+        int? branchId,
         CancellationToken cancellationToken)
     {
         await using var connection = await OpenConnectionAsync(cancellationToken);
@@ -110,7 +152,9 @@ public sealed class VirtualTicketDb
                 r.PaymentSource
             FROM dbo.Receipts r
             WHERE r.ReceiptId = @ReceiptId
-              AND r.PaymentSource = @PaymentSource;
+              AND r.PaymentSource = @PaymentSource
+              AND (@UserId IS NULL OR r.UserId = @UserId)
+              AND (@BranchId IS NULL OR r.BranchId = @BranchId);
 
             SELECT
                 b.BetId,
@@ -131,12 +175,21 @@ public sealed class VirtualTicketDb
             LEFT JOIN dbo.Matches m
                 ON m.BetServiceMatchNo = b.MatchId
             WHERE b.RecieptId = @ReceiptId
+              AND EXISTS (
+                SELECT 1 FROM dbo.Receipts scopedReceipt
+                WHERE scopedReceipt.ReceiptId = b.RecieptId
+                  AND scopedReceipt.PaymentSource = @PaymentSource
+                  AND (@UserId IS NULL OR scopedReceipt.UserId = @UserId)
+                  AND (@BranchId IS NULL OR scopedReceipt.BranchId = @BranchId)
+              )
             ORDER BY b.BetId;
             """,
             connection);
 
         AddParameter(command, "@ReceiptId", SqlDbType.BigInt, receiptId);
         AddParameter(command, "@PaymentSource", SqlDbType.NVarChar, PaymentSource);
+        AddParameter(command, "@UserId", SqlDbType.NVarChar, string.IsNullOrWhiteSpace(userId) ? null : userId);
+        AddParameter(command, "@BranchId", SqlDbType.Int, branchId);
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         if (!await reader.ReadAsync(cancellationToken))
@@ -260,3 +313,5 @@ public sealed class VirtualTicketDb
         return value is DBNull ? null : Convert.ToBoolean(value);
     }
 }
+
+public sealed record TerminalVirtualTicketScope(int BranchId, string UserId);

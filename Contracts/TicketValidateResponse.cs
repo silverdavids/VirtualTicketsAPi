@@ -14,6 +14,8 @@ public sealed class TicketValidationError
     public required string Code { get; set; }
     public required string Field { get; set; }
     public required string Message { get; set; }
+    public int? SelectionIndex { get; set; }
+    public decimal? CurrentOdd { get; set; }
 }
 
 public sealed class TicketValidationWarning

@@ -4,7 +4,7 @@ public sealed class TicketPlaceResponse
 {
     public bool IsPlaced { get; set; }
     public int? ReceiptId { get; set; }
-    public Guid? Serial { get; set; }
+    public Guid? InternalSerial { get; set; }
     public string? TicketNumber { get; set; }
     public string? ShopDisplayName { get; set; }
     public DateTime? BookedAtUtc { get; set; }
