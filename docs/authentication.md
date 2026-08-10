@@ -24,6 +24,32 @@ Protected endpoints:
 - `POST /api/tickets/validate`
 - `POST /api/tickets/place`
 
+Missing credentials return `401 Unauthorized`. Invalid credentials return
+`401 Unauthorized` for bearer-token validation failures or `403 Forbidden` for
+an invalid legacy shared key. Authentication failures do not use `503`.
+
+## Virtual-ticket read isolation
+
+For a JWT whose `auth_type` is `display_terminal`, both virtual-ticket list and
+detail endpoints re-read the current `dbo.Terminals` row. The terminal must be
+active, its terminal code and claimed branch must still match, and its branch's
+`TicketAccountUserId` must resolve to an account in that same branch.
+
+List query `branchId` and `userId` values are ignored for terminal callers. The
+database-verified terminal branch and ticket account are always used. Details
+outside that scope return `404 Not Found`. Legacy shared-key callers retain the
+existing optional administrative filters.
+
+Example: a Branch 2 terminal requesting `?branchId=7` receives only Branch 2's
+ticket-account receipts.
+
+## Placement identifier contract
+
+`ticketNumber` is the canonical customer-facing identifier used for printing,
+lookup, payout, and cancellation. `internalSerial` is the receipt's internal
+GUID and must not be shown or entered as the customer ticket number. The former
+ambiguous public property name `serial` is no longer emitted.
+
 ## Target Terminal Identity Model
 
 Future display authentication should reuse the existing `dbo.Terminals` table

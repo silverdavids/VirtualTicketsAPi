@@ -51,11 +51,11 @@ public sealed class VirtualTicketsApiKeyMiddleware
                 return;
             }
 
-            _logger.LogError("[virtual-tickets-api] VIRTUAL_TICKETS_API_KEY is not set; ticket API auth is unavailable.");
-            context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+            _logger.LogWarning("[virtual-tickets-api] VIRTUAL_TICKETS_API_KEY is not set; shared-key authentication is unavailable.");
+            context.Response.StatusCode = StatusCodes.Status401Unauthorized;
             await context.Response.WriteAsJsonAsync(new
             {
-                message = "Ticket API authentication is not configured."
+                message = "Ticket API authentication is required."
             });
             return;
         }

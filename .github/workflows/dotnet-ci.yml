@@ -32,7 +32,7 @@ jobs:
         run: dotnet restore VirtualTickets.Api.csproj
 
       - name: Build
-        run: dotnet build VirtualTickets.Api.csproj --configuration Release --no-restore
+        run: dotnet build VirtualTickets.Api.csproj --configuration Release --no-restore /p:BuildSha=${{ github.sha }}
 
       - name: Run tests
         shell: bash
@@ -46,7 +46,8 @@ jobs:
               echo "Running tests for $project"
               dotnet test "$project" \
                 --configuration Release \
-                --verbosity normal
+                --verbosity normal \
+                /p:BuildSha=${{ github.sha }}
             done <<< "$test_projects"
           fi
 
@@ -55,7 +56,8 @@ jobs:
           dotnet publish VirtualTickets.Api.csproj \
             --configuration Release \
             --no-build \
-            --output ./publish
+            --output ./publish \
+            /p:BuildSha=${{ github.sha }}
 
       - name: Upload published application
         uses: actions/upload-artifact@v7
@@ -103,5 +105,8 @@ jobs:
           tags: |
             ${{ steps.image.outputs.repository }}:latest
             ${{ steps.image.outputs.repository }}:${{ github.sha }}
+          build-args: |
+            BUILD_SHA=${{ github.sha }}
+            REPOSITORY_URL=https://github.com/${{ github.repository }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

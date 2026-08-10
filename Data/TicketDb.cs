@@ -1,4 +1,5 @@
 using Microsoft.Data.SqlClient;
+using System.Data;
 using VirtualTickets.Api.Contracts;
 using VirtualTickets.Api.Services;
 
@@ -203,7 +204,9 @@ public sealed class TicketDb
         for (var attempt = 1; attempt <= 5; attempt++)
         {
             await using var connection = await OpenConnectionAsync(cancellationToken);
-            await using var transaction = (SqlTransaction)await connection.BeginTransactionAsync(cancellationToken);
+            await using var transaction = (SqlTransaction)await connection.BeginTransactionAsync(
+                terminalIdentity is null ? IsolationLevel.ReadCommitted : IsolationLevel.Serializable,
+                cancellationToken);
             try
             {
             var errors = new List<TicketValidationError>();
@@ -212,6 +215,26 @@ public sealed class TicketDb
             string? shopDisplayName;
             if (terminalIdentity is not null)
             {
+                var existing = await FindExistingTerminalPlacementAsync(
+                    connection,
+                    transaction,
+                    terminalIdentity.TerminalId,
+                    request.ExternalTicketId!,
+                    cancellationToken);
+                if (existing is not null)
+                {
+                    await transaction.CommitAsync(cancellationToken);
+                    return existing;
+                }
+
+                var authoritativeSelections = await ValidateVirtualBoardAsync(
+                    connection, transaction, request, cancellationToken);
+                if (authoritativeSelections.Errors.Count > 0)
+                {
+                    await transaction.RollbackAsync(cancellationToken);
+                    return TicketPlaceResult.Failed(authoritativeSelections.Errors);
+                }
+
                 var ownership = await ResolveTerminalTicketOwnershipAsync(
                     connection, transaction, terminalIdentity, cancellationToken);
                 if (!ownership.IsResolved)
@@ -228,17 +251,31 @@ public sealed class TicketDb
                 receiptUserId = ownership.UserId;
                 shopDisplayName = ownership.ShopDisplayName;
 
-                var existing = await FindExistingTerminalPlacementAsync(
-                    connection,
-                    transaction,
-                    terminalIdentity.TerminalId,
-                    request.ExternalTicketId!,
-                    shopDisplayName,
-                    cancellationToken);
-                if (existing is not null)
+                if (errors.Count == 0)
                 {
+                    var terminalSerial = Guid.NewGuid();
+                    var terminalTicketNumber = TicketNumber.Generate();
+                    var terminalReceipt = await InsertReceiptAsync(
+                        connection, transaction, request, activeSetNo, branchId!.Value,
+                        receiptUserId, "VirtualDisplay", terminalIdentity.TerminalId,
+                        request.ExternalTicketId, terminalSerial, terminalTicketNumber, cancellationToken);
+                    var terminalBets = new List<PlacedBetResponse>();
+                    foreach (var selection in authoritativeSelections.Selections)
+                    {
+                        var betId = await InsertBetAsync(connection, transaction,
+                            terminalReceipt.ReceiptId, selection, cancellationToken);
+                        terminalBets.Add(new PlacedBetResponse
+                        {
+                            BetId = betId,
+                            MatchId = selection.MatchId,
+                            Odd = selection.Selection.Odd
+                        });
+                    }
+
                     await transaction.CommitAsync(cancellationToken);
-                    return existing;
+                    return TicketPlaceResult.Placed(
+                        terminalReceipt.ReceiptId, terminalSerial, terminalTicketNumber, shopDisplayName,
+                        terminalReceipt.BookedAtUtc, terminalBets, activeSetNo);
                 }
             }
             else
@@ -385,15 +422,8 @@ public sealed class TicketDb
     {
         await using var connection = await OpenConnectionAsync(cancellationToken);
         await using var transaction = (SqlTransaction)await connection.BeginTransactionAsync(cancellationToken);
-        var ownership = await ResolveTerminalTicketOwnershipAsync(connection, transaction, identity, cancellationToken);
-        if (!ownership.IsResolved)
-        {
-            await transaction.RollbackAsync(cancellationToken);
-            return null;
-        }
-
         var result = await FindExistingTerminalPlacementAsync(
-            connection, transaction, identity.TerminalId, externalTicketId, ownership.ShopDisplayName, cancellationToken);
+            connection, transaction, identity.TerminalId, externalTicketId, cancellationToken);
         await transaction.CommitAsync(cancellationToken);
         return result;
     }
@@ -403,13 +433,16 @@ public sealed class TicketDb
         SqlTransaction transaction,
         int terminalId,
         string externalTicketId,
-        string? shopDisplayName,
         CancellationToken cancellationToken)
     {
         const string receiptSql = """
-            SELECT ReceiptId, Serial, SerialCode, CreatedOnUtc, SetNo
-            FROM dbo.Receipts
-            WHERE TerminalId = @terminalId AND ExternalTicketId = @externalTicketId
+            SELECT r.ReceiptId, r.Serial, r.SerialCode, r.CreatedOnUtc, r.SetNo,
+                   CASE WHEN b.BranchName IS NULL OR t.TerminalCode IS NULL THEN NULL
+                        ELSE b.BranchName + N'-' + t.TerminalCode END AS ShopDisplayName
+            FROM dbo.Receipts r
+            LEFT JOIN dbo.Branches b ON b.BranchId = r.BranchId
+            LEFT JOIN dbo.Terminals t ON t.TerminalId = r.TerminalId
+            WHERE r.TerminalId = @terminalId AND r.ExternalTicketId = @externalTicketId
             """;
         await using var receiptCommand = new SqlCommand(receiptSql, connection, transaction);
         receiptCommand.Parameters.Add(new SqlParameter("@terminalId", terminalId));
@@ -423,6 +456,7 @@ public sealed class TicketDb
         string ticketNumber;
         DateTime bookedAtUtc;
         long? activeSetNo;
+        string? shopDisplayName;
         await using (var reader = await receiptCommand.ExecuteReaderAsync(cancellationToken))
         {
             if (!await reader.ReadAsync(cancellationToken)) return null;
@@ -431,6 +465,8 @@ public sealed class TicketDb
             ticketNumber = reader.GetString(reader.GetOrdinal("SerialCode"));
             bookedAtUtc = DateTime.SpecifyKind(reader.GetDateTime(reader.GetOrdinal("CreatedOnUtc")), DateTimeKind.Utc);
             activeSetNo = reader.IsDBNull(reader.GetOrdinal("SetNo")) ? null : Convert.ToInt64(reader["SetNo"]);
+            shopDisplayName = reader.IsDBNull(reader.GetOrdinal("ShopDisplayName"))
+                ? null : reader.GetString(reader.GetOrdinal("ShopDisplayName"));
         }
 
         const string betsSql = """
@@ -625,6 +661,133 @@ public sealed class TicketDb
 
         return TicketOwnershipPolicy.Resolve(identity.BranchId, databaseBranchId, configuredUserId, verifiedUserId)
             .WithShopDisplayName($"{branchName}-{terminalCode}");
+    }
+
+    private static async Task<AuthoritativeSelectionValidation> ValidateVirtualBoardAsync(
+        SqlConnection connection,
+        SqlTransaction transaction,
+        TicketValidateRequest request,
+        CancellationToken cancellationToken)
+    {
+        const string boardSql = """
+            SELECT b.Id AS VirtualBoardId, b.ProviderEventId, b.EndAtUtc,
+                   CASE WHEN b.EndAtUtc IS NULL OR b.EndAtUtc <= SYSUTCDATETIME()
+                        THEN CAST(1 AS bit) ELSE CAST(0 AS bit) END AS IsExpired
+            FROM dbo.VirtualCurrentBoard currentBoard WITH (UPDLOCK, HOLDLOCK)
+            INNER JOIN dbo.VirtualBoards b WITH (HOLDLOCK)
+                ON b.Provider = currentBoard.Provider
+               AND b.ProviderEventId = currentBoard.CurrentProviderEventId
+            WHERE currentBoard.Provider = N'VirtualHorizon'
+            """;
+
+        long virtualBoardId;
+        string currentProviderEventId;
+        bool isExpired;
+        await using (var boardCommand = new SqlCommand(boardSql, connection, transaction))
+        await using (var reader = await boardCommand.ExecuteReaderAsync(cancellationToken))
+        {
+            if (!await reader.ReadAsync(cancellationToken))
+            {
+                return AuthoritativeSelectionValidation.Failed(BoardChanged());
+            }
+
+            virtualBoardId = reader.GetInt64(reader.GetOrdinal("VirtualBoardId"));
+            currentProviderEventId = reader.GetString(reader.GetOrdinal("ProviderEventId"));
+            isExpired = reader.GetBoolean(reader.GetOrdinal("IsExpired"));
+        }
+
+        if (!string.Equals(request.Provider, "VirtualHorizon", StringComparison.OrdinalIgnoreCase)
+            || !string.Equals(request.ProviderEventId?.Trim(), currentProviderEventId,
+                StringComparison.Ordinal))
+        {
+            return AuthoritativeSelectionValidation.Failed(BoardChanged());
+        }
+
+        if (isExpired)
+        {
+            return AuthoritativeSelectionValidation.Failed(new TicketValidationError
+            {
+                Code = "board_expired",
+                Field = "providerEventId",
+                Message = "The current VirtualHorizon board is closed for ticket placement."
+            });
+        }
+
+        var resolved = new List<ResolvedTicketSelection>(request.Selections.Count);
+        var errors = new List<TicketValidationError>();
+        for (var index = 0; index < request.Selections.Count; index++)
+        {
+            var selection = request.Selections[index];
+            const string selectionSql = """
+                SELECT TOP (1) BetServiceMatchNo, MatchOddId, Odd
+                FROM dbo.VirtualBoardSelections WITH (HOLDLOCK)
+                WHERE VirtualBoardId = @virtualBoardId
+                  AND ProviderEventId = @providerEventId
+                  AND ProviderMatchId = @providerMatchId
+                  AND Market = @market
+                  AND [Option] = @option
+                  AND ((@lineValue IS NULL AND NULLIF(LTRIM(RTRIM(Line)), N'') IS NULL)
+                       OR TRY_CONVERT(decimal(18, 6), Line) = @lineValue)
+                  AND IsActive = 1
+                  AND (@matchId IS NULL OR BetServiceMatchNo = @matchId)
+                  AND (@matchOddId IS NULL OR MatchOddId = @matchOddId)
+                """;
+            await using var command = new SqlCommand(selectionSql, connection, transaction);
+            command.Parameters.Add(new SqlParameter("@virtualBoardId", virtualBoardId));
+            command.Parameters.Add(new SqlParameter("@providerEventId", currentProviderEventId));
+            command.Parameters.Add(new SqlParameter("@providerMatchId", (object?)selection.ProviderMatchId?.Trim() ?? DBNull.Value));
+            command.Parameters.Add(new SqlParameter("@market", (object?)selection.Market?.Trim() ?? DBNull.Value));
+            command.Parameters.Add(new SqlParameter("@option", (object?)selection.Option?.Trim() ?? DBNull.Value));
+            command.Parameters.Add(new SqlParameter("@lineValue", (object?)selection.Line ?? DBNull.Value));
+            command.Parameters.Add(new SqlParameter("@matchId", (object?)selection.MatchId ?? DBNull.Value));
+            command.Parameters.Add(new SqlParameter("@matchOddId", (object?)selection.MatchOddId ?? DBNull.Value));
+
+            long matchId;
+            decimal currentOdd;
+            await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
+            {
+                if (!await reader.ReadAsync(cancellationToken))
+                {
+                    errors.Add(new TicketValidationError
+                    {
+                        Code = "selection_not_available",
+                        Field = $"selections[{index}]",
+                        SelectionIndex = index,
+                        Message = "The requested selection is not available on the current board."
+                    });
+                    continue;
+                }
+
+                matchId = Convert.ToInt64(reader["BetServiceMatchNo"]);
+                currentOdd = Convert.ToDecimal(reader["Odd"]);
+            }
+
+            if (!VirtualBoardSelectionPolicy.OddsMatch(selection.Odd, currentOdd))
+            {
+                errors.Add(new TicketValidationError
+                {
+                    Code = "odds_changed",
+                    Field = $"selections[{index}].odd",
+                    SelectionIndex = index,
+                    CurrentOdd = currentOdd,
+                    Message = "The selection odd has changed. Refresh the betslip before placing."
+                });
+                continue;
+            }
+
+            resolved.Add(new ResolvedTicketSelection(selection, matchId));
+        }
+
+        return errors.Count == 0
+            ? AuthoritativeSelectionValidation.Succeeded(resolved)
+            : new AuthoritativeSelectionValidation([], errors);
+
+        static TicketValidationError BoardChanged() => new()
+        {
+            Code = "board_changed",
+            Field = "providerEventId",
+            Message = "The VirtualHorizon board has changed. Refresh before placing."
+        };
     }
 
     private async Task<long?> ResolveMatchIdAsync(
@@ -1037,6 +1200,17 @@ public sealed record ProbeResult(bool IsFound, bool IsUnknown, string? Detail)
 }
 
 public sealed record ResolvedTicketSelection(TicketSelectionRequest Selection, long MatchId);
+
+public sealed record AuthoritativeSelectionValidation(
+    List<ResolvedTicketSelection> Selections,
+    List<TicketValidationError> Errors)
+{
+    public static AuthoritativeSelectionValidation Succeeded(List<ResolvedTicketSelection> selections) =>
+        new(selections, []);
+
+    public static AuthoritativeSelectionValidation Failed(TicketValidationError error) =>
+        new([], [error]);
+}
 
 public sealed record TicketPlaceResult(
     bool IsPlaced,

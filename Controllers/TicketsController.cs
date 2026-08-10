@@ -36,7 +36,9 @@ public sealed class TicketsController : ControllerBase
         CancellationToken cancellationToken)
     {
         var response = await _ticketApplicationService.PlaceAsync(request, cancellationToken);
-        return Ok(response);
+        return response.Errors.Any(error => TicketApplicationService.IsConflictError(error.Code))
+            ? Conflict(response)
+            : Ok(response);
     }
 
     [HttpPost("payout/lookup")]

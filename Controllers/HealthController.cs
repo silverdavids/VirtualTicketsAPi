@@ -1,4 +1,5 @@
 using Microsoft.AspNetCore.Mvc;
+using VirtualTickets.Api.Services;
 
 namespace VirtualTickets.Api.Controllers;
 
@@ -11,8 +12,9 @@ public sealed class HealthController : ControllerBase
     {
         return Ok(new
         {
-            status = "ok",
+            status = "healthy",
             service = "VirtualTickets.Api",
+            buildSha = BuildInformation.Sha,
             utc = DateTimeOffset.UtcNow
         });
     }
