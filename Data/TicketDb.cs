@@ -6,6 +6,7 @@ namespace VirtualTickets.Api.Data;
 
 public sealed class TicketDb
 {
+    private const int ExternalTicketIdMaxLength = 100;
     private readonly string? _connectionString;
     private readonly IHostEnvironment _environment;
     private readonly ILogger<TicketDb> _logger;
@@ -226,6 +227,19 @@ public sealed class TicketDb
                 branchId = ownership.BranchId;
                 receiptUserId = ownership.UserId;
                 shopDisplayName = ownership.ShopDisplayName;
+
+                var existing = await FindExistingTerminalPlacementAsync(
+                    connection,
+                    transaction,
+                    terminalIdentity.TerminalId,
+                    request.ExternalTicketId!,
+                    shopDisplayName,
+                    cancellationToken);
+                if (existing is not null)
+                {
+                    await transaction.CommitAsync(cancellationToken);
+                    return existing;
+                }
             }
             else
             {
@@ -279,6 +293,8 @@ public sealed class TicketDb
                 branchId!.Value,
                 receiptUserId,
                 terminalIdentity is null ? request.Source : "VirtualDisplay",
+                terminalIdentity?.TerminalId,
+                terminalIdentity is null ? null : request.ExternalTicketId,
                 serial,
                 ticketNumber,
                 cancellationToken);
@@ -303,7 +319,32 @@ public sealed class TicketDb
                     ticketNumber,
                     shopDisplayName,
                     insertedReceipt.BookedAtUtc,
-                    placedBets);
+                    placedBets,
+                    activeSetNo);
+            }
+            catch (SqlException exception) when (
+                terminalIdentity is not null &&
+                IsExternalTicketIdCollision(exception))
+            {
+                await RollbackQuietlyAsync(transaction, cancellationToken);
+                var existing = await FindExistingTerminalPlacementAsync(
+                    terminalIdentity, request.ExternalTicketId!, cancellationToken);
+                if (existing is not null)
+                {
+                    _logger.LogInformation(
+                        "Resolved concurrent ticket placement retry for TerminalId {TerminalId} and ExternalTicketId {ExternalTicketId}.",
+                        terminalIdentity.TerminalId,
+                        request.ExternalTicketId);
+                    return existing;
+                }
+
+                _logger.LogError(exception, "Idempotent ticket collision occurred but the original receipt could not be loaded.");
+                return TicketPlaceResult.Failed([new TicketValidationError
+                {
+                    Code = "ticket_retry_resolution_failed",
+                    Field = "externalTicketId",
+                    Message = "The original ticket placement could not be resolved."
+                }]);
             }
             catch (SqlException exception) when (IsTicketNumberCollision(exception) && attempt < 5)
             {
@@ -335,6 +376,85 @@ public sealed class TicketDb
                 Message = "A unique ticket number could not be generated."
             }
         ]);
+    }
+
+    public async Task<TicketPlaceResult?> FindExistingTerminalPlacementAsync(
+        TerminalTicketIdentity identity,
+        string externalTicketId,
+        CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenConnectionAsync(cancellationToken);
+        await using var transaction = (SqlTransaction)await connection.BeginTransactionAsync(cancellationToken);
+        var ownership = await ResolveTerminalTicketOwnershipAsync(connection, transaction, identity, cancellationToken);
+        if (!ownership.IsResolved)
+        {
+            await transaction.RollbackAsync(cancellationToken);
+            return null;
+        }
+
+        var result = await FindExistingTerminalPlacementAsync(
+            connection, transaction, identity.TerminalId, externalTicketId, ownership.ShopDisplayName, cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
+        return result;
+    }
+
+    private static async Task<TicketPlaceResult?> FindExistingTerminalPlacementAsync(
+        SqlConnection connection,
+        SqlTransaction transaction,
+        int terminalId,
+        string externalTicketId,
+        string? shopDisplayName,
+        CancellationToken cancellationToken)
+    {
+        const string receiptSql = """
+            SELECT ReceiptId, Serial, SerialCode, CreatedOnUtc, SetNo
+            FROM dbo.Receipts
+            WHERE TerminalId = @terminalId AND ExternalTicketId = @externalTicketId
+            """;
+        await using var receiptCommand = new SqlCommand(receiptSql, connection, transaction);
+        receiptCommand.Parameters.Add(new SqlParameter("@terminalId", terminalId));
+        receiptCommand.Parameters.Add(new SqlParameter("@externalTicketId", System.Data.SqlDbType.VarChar, ExternalTicketIdMaxLength)
+        {
+            Value = externalTicketId
+        });
+
+        int receiptId;
+        Guid serial;
+        string ticketNumber;
+        DateTime bookedAtUtc;
+        long? activeSetNo;
+        await using (var reader = await receiptCommand.ExecuteReaderAsync(cancellationToken))
+        {
+            if (!await reader.ReadAsync(cancellationToken)) return null;
+            receiptId = reader.GetInt32(reader.GetOrdinal("ReceiptId"));
+            serial = reader.GetGuid(reader.GetOrdinal("Serial"));
+            ticketNumber = reader.GetString(reader.GetOrdinal("SerialCode"));
+            bookedAtUtc = DateTime.SpecifyKind(reader.GetDateTime(reader.GetOrdinal("CreatedOnUtc")), DateTimeKind.Utc);
+            activeSetNo = reader.IsDBNull(reader.GetOrdinal("SetNo")) ? null : Convert.ToInt64(reader["SetNo"]);
+        }
+
+        const string betsSql = """
+            SELECT BetId, MatchId, BetOdd
+            FROM dbo.Bets
+            WHERE RecieptId = @receiptId
+            ORDER BY BetId
+            """;
+        await using var betsCommand = new SqlCommand(betsSql, connection, transaction);
+        betsCommand.Parameters.Add(new SqlParameter("@receiptId", receiptId));
+        var bets = new List<PlacedBetResponse>();
+        await using var betsReader = await betsCommand.ExecuteReaderAsync(cancellationToken);
+        while (await betsReader.ReadAsync(cancellationToken))
+        {
+            bets.Add(new PlacedBetResponse
+            {
+                BetId = betsReader.GetInt32(betsReader.GetOrdinal("BetId")),
+                MatchId = Convert.ToInt64(betsReader["MatchId"]),
+                Odd = Convert.ToDecimal(betsReader["BetOdd"])
+            });
+        }
+
+        return TicketPlaceResult.Placed(
+            receiptId, serial, ticketNumber, shopDisplayName, bookedAtUtc, bets, activeSetNo);
     }
 
     private async Task<string?> FindTableAsync(IEnumerable<string> tableNames, CancellationToken cancellationToken)
@@ -588,6 +708,8 @@ public sealed class TicketDb
         int branchId,
         string? receiptUserId,
         string? paymentSource,
+        int? terminalId,
+        string? externalTicketId,
         Guid serial,
         string ticketNumber,
         CancellationToken cancellationToken)
@@ -622,6 +744,8 @@ public sealed class TicketDb
                 CreatedOn,
                 CreatedOnUtc,
                 PaymentSource,
+                TerminalId,
+                ExternalTicketId,
                 ModifiedOn,
                 ModifiedOnUtc
             )
@@ -648,6 +772,8 @@ public sealed class TicketDb
                 @createdOn,
                 @createdOnUtc,
                 @paymentSource,
+                @terminalId,
+                @externalTicketId,
                 @createdOn,
                 @createdOnUtc
             )
@@ -666,7 +792,12 @@ public sealed class TicketDb
                 new("@receiptStatus", (int)ReceiptStatus.Pending),
                 new("@createdOn", now),
                 new("@createdOnUtc", utcNow),
-                new("@paymentSource", (object?)paymentSource ?? DBNull.Value)
+                new("@paymentSource", (object?)paymentSource ?? DBNull.Value),
+                new("@terminalId", (object?)terminalId ?? DBNull.Value),
+                new SqlParameter("@externalTicketId", System.Data.SqlDbType.VarChar, ExternalTicketIdMaxLength)
+                {
+                    Value = (object?)externalTicketId ?? DBNull.Value
+                }
             ],
             cancellationToken);
     }
@@ -793,6 +924,10 @@ public sealed class TicketDb
         exception.Number is 2601 or 2627
         && exception.Message.Contains("UX_Receipts_SerialCode", StringComparison.OrdinalIgnoreCase);
 
+    private static bool IsExternalTicketIdCollision(SqlException exception) =>
+        exception.Number is 2601 or 2627
+        && exception.Message.Contains("UX_Receipts_Terminal_ExternalTicketId", StringComparison.OrdinalIgnoreCase);
+
     private async Task AddReferenceTableAsync(
         string logicalName,
         IEnumerable<string> candidates,
@@ -911,7 +1046,8 @@ public sealed record TicketPlaceResult(
     string? ShopDisplayName,
     DateTime? BookedAtUtc,
     List<PlacedBetResponse> Bets,
-    List<TicketValidationError> Errors)
+    List<TicketValidationError> Errors,
+    long? ActiveSetNo)
 {
     public static TicketPlaceResult Placed(
         int receiptId,
@@ -919,11 +1055,12 @@ public sealed record TicketPlaceResult(
         string ticketNumber,
         string? shopDisplayName,
         DateTime bookedAtUtc,
-        List<PlacedBetResponse> bets) =>
-        new(true, receiptId, serial, ticketNumber, shopDisplayName, bookedAtUtc, bets, []);
+        List<PlacedBetResponse> bets,
+        long? activeSetNo) =>
+        new(true, receiptId, serial, ticketNumber, shopDisplayName, bookedAtUtc, bets, [], activeSetNo);
 
     public static TicketPlaceResult Failed(List<TicketValidationError> errors) =>
-        new(false, null, null, null, null, null, [], errors);
+        new(false, null, null, null, null, null, [], errors, null);
 }
 
 public sealed record InsertedReceipt(int ReceiptId, DateTime BookedAtUtc);
