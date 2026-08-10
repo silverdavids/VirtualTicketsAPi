@@ -7,6 +7,7 @@ namespace VirtualTickets.Api.Services;
 
 public sealed class TicketApplicationService
 {
+    private const int ExternalTicketIdMaxLength = 100;
     private readonly TicketDb _ticketDb;
     private readonly StakeValidator _stakeValidator;
     private readonly AccountValidator _accountValidator;
@@ -33,10 +34,23 @@ public sealed class TicketApplicationService
     public async Task<TicketValidateResponse> ValidateAsync(TicketValidateRequest request, CancellationToken cancellationToken)
     {
         var response = new TicketValidateResponse();
+        var terminalIdentity = ResolveTerminalIdentity();
 
         Required(response, request.Source, "source", "source_required", "Source is required.");
         Required(response, request.Provider, "provider", "provider_required", "Provider is required.");
-        Required(response, request.ExternalTicketId, "externalTicketId", "external_ticket_id_required", "External ticket id is required.");
+        if (terminalIdentity is not null)
+        {
+            Required(response, request.ExternalTicketId, "externalTicketId", "external_ticket_id_required", "External ticket id is required.");
+            if (request.ExternalTicketId?.Length > ExternalTicketIdMaxLength)
+            {
+                response.Errors.Add(new TicketValidationError
+                {
+                    Code = "external_ticket_id_too_long",
+                    Field = "externalTicketId",
+                    Message = $"External ticket id cannot exceed {ExternalTicketIdMaxLength} characters."
+                });
+            }
+        }
 
         _stakeValidator.Validate(request, response);
         ValidateSelections(request, response);
@@ -83,7 +97,7 @@ public sealed class TicketApplicationService
         }
 
         await _setValidator.ValidateAsync(response, cancellationToken);
-        if (ResolveTerminalIdentity() is null)
+        if (terminalIdentity is null)
         {
             await _accountValidator.ValidateAsync(request, response, cancellationToken);
         }
@@ -94,6 +108,19 @@ public sealed class TicketApplicationService
 
     public async Task<TicketPlaceResponse> PlaceAsync(TicketValidateRequest request, CancellationToken cancellationToken)
     {
+        var terminalIdentity = ResolveTerminalIdentity();
+        if (terminalIdentity is not null
+            && !string.IsNullOrWhiteSpace(request.ExternalTicketId)
+            && request.ExternalTicketId.Length <= ExternalTicketIdMaxLength)
+        {
+            var existing = await _ticketDb.FindExistingTerminalPlacementAsync(
+                terminalIdentity, request.ExternalTicketId, cancellationToken);
+            if (existing is not null)
+            {
+                return ToRetryResponse(existing);
+            }
+        }
+
         var validation = await ValidateAsync(request, cancellationToken);
         var response = new TicketPlaceResponse
         {
@@ -136,7 +163,7 @@ public sealed class TicketApplicationService
         var placeResult = await _ticketDb.PlaceTicketAsync(
             request,
             validation.ActiveSetNo.Value,
-            ResolveTerminalIdentity(),
+            terminalIdentity,
             cancellationToken);
         if (!placeResult.IsPlaced)
         {
@@ -156,6 +183,19 @@ public sealed class TicketApplicationService
 
         return response;
     }
+
+    private static TicketPlaceResponse ToRetryResponse(TicketPlaceResult existing) => new()
+    {
+        IsPlaced = true,
+        ReceiptId = existing.ReceiptId,
+        Serial = existing.Serial,
+        TicketNumber = existing.TicketNumber,
+        ShopDisplayName = existing.ShopDisplayName,
+        BookedAtUtc = existing.BookedAtUtc,
+        ActiveSetNo = existing.ActiveSetNo,
+        Bets = existing.Bets,
+        Checks = new Dictionary<string, string> { ["place"] = "idempotent_retry" }
+    };
 
     private TerminalTicketIdentity? ResolveTerminalIdentity()
     {
