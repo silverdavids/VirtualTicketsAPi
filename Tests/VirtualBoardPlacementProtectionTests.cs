@@ -54,10 +54,21 @@ public sealed class VirtualBoardPlacementProtectionTests
         Assert.True(idempotency >= 0 && idempotency < boardValidation);
         Assert.True(boardValidation < ownership && ownership < receipt);
         Assert.Contains("IsolationLevel.Serializable", source);
-        Assert.Contains("VirtualCurrentBoard currentBoard WITH (UPDLOCK, HOLDLOCK)", source);
+        Assert.Contains("dbo.VirtualBoards b WITH (UPDLOCK, HOLDLOCK)", source);
+        Assert.Contains("b.ProviderEventId = @providerEventId", source);
+        Assert.Contains("b.Status <> 0 OR b.HasResults = 1", source);
+        Assert.Contains("b.EndAtUtc IS NOT NULL AND b.EndAtUtc <= SYSUTCDATETIME()", source);
+        Assert.DoesNotContain("FROM dbo.VirtualCurrentBoard", source);
         Assert.Contains("dbo.VirtualBoardSelections WITH (HOLDLOCK)", source);
         Assert.Contains("await transaction.CommitAsync", source);
         Assert.DoesNotContain("MatchOdds.LastUpdateTime", source);
+    }
+
+    [Fact]
+    public void Boards_without_an_end_time_are_not_automatically_expired()
+    {
+        var source = File.ReadAllText(Path.Combine(ProjectRoot(), "Data", "TicketDb.cs"));
+        Assert.DoesNotContain("b.EndAtUtc IS NULL OR b.EndAtUtc <= SYSUTCDATETIME()", source);
     }
 
     [Fact]

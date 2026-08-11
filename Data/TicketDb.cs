@@ -669,23 +669,30 @@ public sealed class TicketDb
         TicketValidateRequest request,
         CancellationToken cancellationToken)
     {
+        var requestedProviderEventId = request.ProviderEventId?.Trim();
+        if (!string.Equals(request.Provider?.Trim(), "VirtualHorizon", StringComparison.OrdinalIgnoreCase)
+            || string.IsNullOrWhiteSpace(requestedProviderEventId))
+        {
+            return AuthoritativeSelectionValidation.Failed(BoardChanged());
+        }
+
         const string boardSql = """
-            SELECT b.Id AS VirtualBoardId, b.ProviderEventId, b.EndAtUtc,
-                   CASE WHEN b.EndAtUtc IS NULL OR b.EndAtUtc <= SYSUTCDATETIME()
+            SELECT b.Id AS VirtualBoardId, b.ProviderEventId,
+                   CASE WHEN b.Status <> 0 OR b.HasResults = 1
+                                  OR (b.EndAtUtc IS NOT NULL AND b.EndAtUtc <= SYSUTCDATETIME())
                         THEN CAST(1 AS bit) ELSE CAST(0 AS bit) END AS IsExpired
-            FROM dbo.VirtualCurrentBoard currentBoard WITH (UPDLOCK, HOLDLOCK)
-            INNER JOIN dbo.VirtualBoards b WITH (HOLDLOCK)
-                ON b.Provider = currentBoard.Provider
-               AND b.ProviderEventId = currentBoard.CurrentProviderEventId
-            WHERE currentBoard.Provider = N'VirtualHorizon'
+            FROM dbo.VirtualBoards b WITH (UPDLOCK, HOLDLOCK)
+            WHERE b.Provider = N'VirtualHorizon'
+              AND b.ProviderEventId = @providerEventId
             """;
 
         long virtualBoardId;
         string currentProviderEventId;
         bool isExpired;
         await using (var boardCommand = new SqlCommand(boardSql, connection, transaction))
-        await using (var reader = await boardCommand.ExecuteReaderAsync(cancellationToken))
         {
+            boardCommand.Parameters.Add(new SqlParameter("@providerEventId", requestedProviderEventId));
+            await using var reader = await boardCommand.ExecuteReaderAsync(cancellationToken);
             if (!await reader.ReadAsync(cancellationToken))
             {
                 return AuthoritativeSelectionValidation.Failed(BoardChanged());
@@ -694,13 +701,6 @@ public sealed class TicketDb
             virtualBoardId = reader.GetInt64(reader.GetOrdinal("VirtualBoardId"));
             currentProviderEventId = reader.GetString(reader.GetOrdinal("ProviderEventId"));
             isExpired = reader.GetBoolean(reader.GetOrdinal("IsExpired"));
-        }
-
-        if (!string.Equals(request.Provider, "VirtualHorizon", StringComparison.OrdinalIgnoreCase)
-            || !string.Equals(request.ProviderEventId?.Trim(), currentProviderEventId,
-                StringComparison.Ordinal))
-        {
-            return AuthoritativeSelectionValidation.Failed(BoardChanged());
         }
 
         if (isExpired)
