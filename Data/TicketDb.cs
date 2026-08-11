@@ -687,7 +687,7 @@ public sealed class TicketDb
             """;
 
         long virtualBoardId;
-        string currentProviderEventId;
+        string submittedProviderEventId;
         bool isExpired;
         await using (var boardCommand = new SqlCommand(boardSql, connection, transaction))
         {
@@ -699,7 +699,7 @@ public sealed class TicketDb
             }
 
             virtualBoardId = reader.GetInt64(reader.GetOrdinal("VirtualBoardId"));
-            currentProviderEventId = reader.GetString(reader.GetOrdinal("ProviderEventId"));
+            submittedProviderEventId = reader.GetString(reader.GetOrdinal("ProviderEventId"));
             isExpired = reader.GetBoolean(reader.GetOrdinal("IsExpired"));
         }
 
@@ -719,27 +719,36 @@ public sealed class TicketDb
         {
             var selection = request.Selections[index];
             const string selectionSql = """
-                SELECT TOP (1) BetServiceMatchNo, MatchOddId, Odd
-                FROM dbo.VirtualBoardSelections WITH (HOLDLOCK)
-                WHERE VirtualBoardId = @virtualBoardId
-                  AND ProviderEventId = @providerEventId
-                  AND ProviderMatchId = @providerMatchId
-                  AND Market = @market
-                  AND [Option] = @option
-                  AND ((@lineValue IS NULL AND NULLIF(LTRIM(RTRIM(Line)), N'') IS NULL)
-                       OR TRY_CONVERT(decimal(18, 6), Line) = @lineValue)
-                  AND IsActive = 1
-                  AND (@matchId IS NULL OR BetServiceMatchNo = @matchId)
-                  AND (@matchOddId IS NULL OR MatchOddId = @matchOddId)
+                SELECT TOP (1)
+                    boardMatch.BetServiceMatchNo,
+                    snapshot.MatchOddId,
+                    COALESCE(currentOdd.Odd, snapshot.Odd) AS Odd
+                FROM dbo.VirtualBoardMatchesMap boardMatch WITH (HOLDLOCK)
+                INNER JOIN dbo.VirtualBoardSelections snapshot WITH (HOLDLOCK)
+                    ON snapshot.VirtualBoardId = boardMatch.VirtualBoardId
+                   AND snapshot.ProviderMatchId = boardMatch.ProviderMatchId
+                   AND snapshot.BetServiceMatchNo = boardMatch.BetServiceMatchNo
+                LEFT JOIN dbo.MatchOdds currentOdd WITH (UPDLOCK, HOLDLOCK)
+                    ON currentOdd.BetServiceMatchNo = boardMatch.BetServiceMatchNo
+                   AND currentOdd.MatchOddId = snapshot.MatchOddId
+                WHERE boardMatch.VirtualBoardId = @virtualBoardId
+                  AND boardMatch.ProviderMatchId = @providerMatchId
+                  AND snapshot.ProviderEventId = @providerEventId
+                  AND snapshot.Market = @market
+                  AND snapshot.[Option] = @option
+                  AND ((@lineValue IS NULL AND NULLIF(LTRIM(RTRIM(snapshot.Line)), N'') IS NULL)
+                       OR TRY_CONVERT(decimal(18, 6), snapshot.Line) = @lineValue)
+                  AND snapshot.IsActive = 1
+                  AND (currentOdd.MatchOddId IS NULL OR ISNULL(currentOdd.IsLocked, 0) = 0)
+                  AND (@matchOddId IS NULL OR snapshot.MatchOddId = @matchOddId)
                 """;
             await using var command = new SqlCommand(selectionSql, connection, transaction);
             command.Parameters.Add(new SqlParameter("@virtualBoardId", virtualBoardId));
-            command.Parameters.Add(new SqlParameter("@providerEventId", currentProviderEventId));
+            command.Parameters.Add(new SqlParameter("@providerEventId", submittedProviderEventId));
             command.Parameters.Add(new SqlParameter("@providerMatchId", (object?)selection.ProviderMatchId?.Trim() ?? DBNull.Value));
             command.Parameters.Add(new SqlParameter("@market", (object?)selection.Market?.Trim() ?? DBNull.Value));
             command.Parameters.Add(new SqlParameter("@option", (object?)selection.Option?.Trim() ?? DBNull.Value));
             command.Parameters.Add(new SqlParameter("@lineValue", (object?)selection.Line ?? DBNull.Value));
-            command.Parameters.Add(new SqlParameter("@matchId", (object?)selection.MatchId ?? DBNull.Value));
             command.Parameters.Add(new SqlParameter("@matchOddId", (object?)selection.MatchOddId ?? DBNull.Value));
 
             long matchId;
@@ -753,7 +762,7 @@ public sealed class TicketDb
                         Code = "selection_not_available",
                         Field = $"selections[{index}]",
                         SelectionIndex = index,
-                        Message = "The requested selection is not available on the current board."
+                        Message = "The requested selection is not available on the submitted VirtualHorizon board."
                     });
                     continue;
                 }

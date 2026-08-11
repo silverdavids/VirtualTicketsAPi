@@ -59,7 +59,7 @@ public sealed class VirtualBoardPlacementProtectionTests
         Assert.Contains("b.Status <> 0 OR b.HasResults = 1", source);
         Assert.Contains("b.EndAtUtc IS NOT NULL AND b.EndAtUtc <= SYSUTCDATETIME()", source);
         Assert.DoesNotContain("FROM dbo.VirtualCurrentBoard", source);
-        Assert.Contains("dbo.VirtualBoardSelections WITH (HOLDLOCK)", source);
+        Assert.Contains("dbo.VirtualBoardSelections snapshot WITH (HOLDLOCK)", source);
         Assert.Contains("await transaction.CommitAsync", source);
         Assert.DoesNotContain("MatchOdds.LastUpdateTime", source);
     }
@@ -75,15 +75,65 @@ public sealed class VirtualBoardPlacementProtectionTests
     public void Snapshot_query_cannot_be_bypassed_by_crafted_match_identity()
     {
         var source = File.ReadAllText(Path.Combine(ProjectRoot(), "Data", "TicketDb.cs"));
-        Assert.Contains("VirtualBoardId = @virtualBoardId", source);
-        Assert.Contains("ProviderEventId = @providerEventId", source);
-        Assert.Contains("ProviderMatchId = @providerMatchId", source);
-        Assert.Contains("Market = @market", source);
-        Assert.Contains("[Option] = @option", source);
-        Assert.Contains("TRY_CONVERT(decimal(18, 6), Line) = @lineValue", source);
-        Assert.Contains("IsActive = 1", source);
-        Assert.Contains("BetServiceMatchNo = @matchId", source);
-        Assert.Contains("MatchOddId = @matchOddId", source);
+        Assert.Contains("boardMatch.VirtualBoardId = @virtualBoardId", source);
+        Assert.Contains("snapshot.ProviderEventId = @providerEventId", source);
+        Assert.Contains("boardMatch.ProviderMatchId = @providerMatchId", source);
+        Assert.Contains("snapshot.Market = @market", source);
+        Assert.Contains("snapshot.[Option] = @option", source);
+        Assert.Contains("TRY_CONVERT(decimal(18, 6), snapshot.Line) = @lineValue", source);
+        Assert.Contains("snapshot.IsActive = 1", source);
+        Assert.Contains("snapshot.MatchOddId = @matchOddId", source);
+    }
+
+    [Fact]
+    public void Board_a_selection_does_not_follow_board_b_current_pointer()
+    {
+        var source = File.ReadAllText(Path.Combine(ProjectRoot(), "Data", "TicketDb.cs"));
+        Assert.Contains("FROM dbo.VirtualBoardMatchesMap boardMatch WITH (HOLDLOCK)", source);
+        Assert.Contains("boardMatch.VirtualBoardId = @virtualBoardId", source);
+        Assert.Contains("snapshot.ProviderEventId = @providerEventId", source);
+        Assert.DoesNotContain("FROM dbo.VirtualCurrentBoard", source);
+    }
+
+    [Fact]
+    public void Selection_on_submitted_board_uses_board_mapping_not_client_match_id()
+    {
+        var source = File.ReadAllText(Path.Combine(ProjectRoot(), "Data", "TicketDb.cs"));
+        var selectionLookupStart = source.IndexOf("const string selectionSql", StringComparison.Ordinal);
+        var selectionLookupEnd = source.IndexOf("long matchId;", selectionLookupStart, StringComparison.Ordinal);
+        var selectionLookup = source[selectionLookupStart..selectionLookupEnd];
+        Assert.Contains("snapshot.BetServiceMatchNo = boardMatch.BetServiceMatchNo", selectionLookup);
+        Assert.DoesNotContain("BetServiceMatchNo = @matchId", selectionLookup);
+        Assert.DoesNotContain("new SqlParameter(\"@matchId\"", selectionLookup);
+    }
+
+    [Fact]
+    public void Selection_genuinely_absent_from_submitted_board_has_precise_error()
+    {
+        var source = File.ReadAllText(Path.Combine(ProjectRoot(), "Data", "TicketDb.cs"));
+        Assert.Contains("Code = \"selection_not_available\"", source);
+        Assert.Contains("The requested selection is not available on the submitted VirtualHorizon board.", source);
+    }
+
+    [Fact]
+    public void Selection_odd_changed_uses_unlocked_authoritative_match_odd()
+    {
+        var source = File.ReadAllText(Path.Combine(ProjectRoot(), "Data", "TicketDb.cs"));
+        Assert.Contains("LEFT JOIN dbo.MatchOdds currentOdd WITH (UPDLOCK, HOLDLOCK)", source);
+        Assert.Contains("currentOdd.MatchOddId = snapshot.MatchOddId", source);
+        Assert.Contains("currentOdd.MatchOddId IS NULL OR ISNULL(currentOdd.IsLocked, 0) = 0", source);
+        Assert.Contains("COALESCE(currentOdd.Odd, snapshot.Odd) AS Odd", source);
+        Assert.Contains("Code = \"odds_changed\"", source);
+    }
+
+    [Fact]
+    public void Completed_or_resulted_board_is_rejected_before_selection_lookup()
+    {
+        var source = File.ReadAllText(Path.Combine(ProjectRoot(), "Data", "TicketDb.cs"));
+        var completedCheck = source.IndexOf("b.Status <> 0 OR b.HasResults = 1", StringComparison.Ordinal);
+        var expiredReturn = source.IndexOf("Code = \"board_expired\"", StringComparison.Ordinal);
+        var selectionLookup = source.IndexOf("FROM dbo.VirtualBoardMatchesMap", StringComparison.Ordinal);
+        Assert.True(completedCheck >= 0 && completedCheck < expiredReturn && expiredReturn < selectionLookup);
     }
 
     [Fact]
