@@ -50,3 +50,5 @@ coverage/
 
 # Generated artifacts
 artifacts/livedocker-compose.txt
+
+artifacts/
