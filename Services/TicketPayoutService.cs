@@ -38,7 +38,6 @@ public sealed class TicketPayoutService
         var identity = ResolveTerminalIdentity();
         await using var connection = await OpenAsync(cancellationToken);
         await ValidateActiveTerminalAsync(connection, null, identity, cancellationToken);
-        await ResolvePayoutUserAsync(connection, null, identity.BranchId, false, cancellationToken);
         var receipt = await FindReceiptAsync(connection, null, ticketNumber, false, cancellationToken)
             ?? throw Error(404, "TicketNotFound", "Ticket was not found.", ticketNumber);
 
