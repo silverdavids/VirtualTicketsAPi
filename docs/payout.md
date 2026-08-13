@@ -21,13 +21,17 @@ Payout requires a configured, active payout user resolved by the server.
 ```json
 "VirtualTicketPayout": {
   "Currency": "UGX",
-  "PayoutUserId": ""
+  "PayoutUserId": "f78187cd-bef7-4f16-8728-3a0031125879"
 }
 ```
 
 `PayoutUserId` must be a GUID belonging to an activated `AspNetUsers` row with
 an `Accounts` row for the terminal branch. Missing, malformed, nonexistent,
 inactive, or wrong-branch users produce `PayoutUserNotConfigured`.
+
+Ticket lookup does not require a payout user because it is read-only. The
+configured payout user is validated inside the serializable transaction when
+an actual payout or cancellation is requested.
 
 The configured, active payout user is recorded on the receipt and in
 `VirtualTicketPayouts.PaidByUserId`, together with the authenticated terminal,
