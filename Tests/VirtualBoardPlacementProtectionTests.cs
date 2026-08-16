@@ -212,17 +212,69 @@ public sealed class VirtualBoardPlacementProtectionTests
     }
 
     [Fact]
-    public void Combined_result_and_total_market_preserves_its_result_scope()
+    public void Combined_result_and_total_market_preserves_all_components()
     {
-        var submitted = Selection("OVER_UNDER_1X2", "OVER_1.5_HOME", null);
+        var submitted = Selection("1X2_OU_1.5", "1+OV1.5", 1.5m);
 
         Assert.True(VirtualBoardSelectionPolicy.IsSameSelection(
             submitted, "OVER_UNDER_1X2", "OVER_1.5_HOME", ""));
         Assert.False(VirtualBoardSelectionPolicy.IsSameSelection(
             submitted, "OVER_UNDER_1X2", "OVER_1.5_AWAY", ""));
+    }
+
+    [Theory]
+    [InlineData("X+OV1.5", "OVER_1.5_DRAW")]
+    [InlineData("2+OV1.5", "OVER_1.5_AWAY")]
+    [InlineData("1+UN1.5", "UNDER_1.5_HOME")]
+    [InlineData("X+UN2.5", "UNDER_2.5_DRAW")]
+    public void Combined_market_normalizes_verified_variants(string submittedOption, string snapshotOption)
+    {
+        var line = submittedOption.Contains("2.5", StringComparison.Ordinal) ? 2.5m : 1.5m;
+        var submitted = Selection($"1X2_OU_{line}", submittedOption, line);
+
+        Assert.True(VirtualBoardSelectionPolicy.IsSameSelection(
+            submitted, "OVER_UNDER_1X2", snapshotOption, ""));
+    }
+
+    [Theory]
+    [InlineData("OVER_1.5_DRAW")]
+    [InlineData("UNDER_1.5_HOME")]
+    [InlineData("OVER_2.5_HOME")]
+    public void Combined_market_rejects_component_mismatches(string snapshotOption)
+    {
+        var submitted = Selection("1X2_OU_1.5", "1+OV1.5", 1.5m);
+
         Assert.False(VirtualBoardSelectionPolicy.IsSameSelection(
-            Selection("OVER_UNDER_1X2", "OV1.5", 1.5m),
-            "OVER_UNDER_1X2", "OVER_1.5_HOME", ""));
+            submitted, "OVER_UNDER_1X2", snapshotOption, ""));
+    }
+
+    [Theory]
+    [InlineData("1X2_OU_1.5", "1+OV2.5", 1.5)]
+    [InlineData("1X2_OU_1.5", "1+OV1.5", 2.5)]
+    public void Combined_market_rejects_contradictory_submitted_lines(string market, string option, double line)
+    {
+        var submitted = Selection(market, option, (decimal)line);
+
+        Assert.False(VirtualBoardSelectionPolicy.IsSameSelection(
+            submitted, "OVER_UNDER_1X2", "OVER_1.5_HOME", ""));
+    }
+
+    [Fact]
+    public void Combined_market_rejects_contradictory_snapshot_line()
+    {
+        var submitted = Selection("1X2_OU_1.5", "1+OV1.5", 1.5m);
+
+        Assert.False(VirtualBoardSelectionPolicy.IsSameSelection(
+            submitted, "OVER_UNDER_1X2", "OVER_2.5_HOME", "1.5"));
+    }
+
+    [Fact]
+    public void Plain_markets_cannot_match_combined_market()
+    {
+        Assert.False(VirtualBoardSelectionPolicy.IsSameSelection(
+            Selection("1X2", "1", null), "OVER_UNDER_1X2", "OVER_1.5_HOME", ""));
+        Assert.False(VirtualBoardSelectionPolicy.IsSameSelection(
+            Selection("OU", "OV1.5", 1.5m), "OVER_UNDER_1X2", "OVER_1.5_HOME", ""));
     }
 
     [Fact]
