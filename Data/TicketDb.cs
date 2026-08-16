@@ -663,7 +663,7 @@ public sealed class TicketDb
             .WithShopDisplayName($"{branchName}-{terminalCode}");
     }
 
-    private static async Task<AuthoritativeSelectionValidation> ValidateVirtualBoardAsync(
+    private async Task<AuthoritativeSelectionValidation> ValidateVirtualBoardAsync(
         SqlConnection connection,
         SqlTransaction transaction,
         TicketValidateRequest request,
@@ -719,9 +719,12 @@ public sealed class TicketDb
         {
             var selection = request.Selections[index];
             const string selectionSql = """
-                SELECT TOP (1)
+                SELECT
                     boardMatch.BetServiceMatchNo,
                     snapshot.MatchOddId,
+                    snapshot.Market,
+                    snapshot.[Option],
+                    snapshot.Line,
                     COALESCE(currentOdd.Odd, snapshot.Odd) AS Odd
                 FROM dbo.VirtualBoardMatchesMap boardMatch WITH (HOLDLOCK)
                 INNER JOIN dbo.VirtualBoardSelections snapshot WITH (HOLDLOCK)
@@ -734,57 +737,67 @@ public sealed class TicketDb
                 WHERE boardMatch.VirtualBoardId = @virtualBoardId
                   AND boardMatch.ProviderMatchId = @providerMatchId
                   AND snapshot.ProviderEventId = @providerEventId
-                  AND snapshot.Market = @market
-                  AND snapshot.[Option] = @option
-                  AND ((@lineValue IS NULL AND NULLIF(LTRIM(RTRIM(snapshot.Line)), N'') IS NULL)
-                       OR TRY_CONVERT(decimal(18, 6), snapshot.Line) = @lineValue)
                   AND snapshot.IsActive = 1
                   AND (currentOdd.MatchOddId IS NULL OR ISNULL(currentOdd.IsLocked, 0) = 0)
                   AND (@matchOddId IS NULL OR snapshot.MatchOddId = @matchOddId)
+                ORDER BY snapshot.MatchOddId
                 """;
             await using var command = new SqlCommand(selectionSql, connection, transaction);
             command.Parameters.Add(new SqlParameter("@virtualBoardId", virtualBoardId));
             command.Parameters.Add(new SqlParameter("@providerEventId", submittedProviderEventId));
             command.Parameters.Add(new SqlParameter("@providerMatchId", (object?)selection.ProviderMatchId?.Trim() ?? DBNull.Value));
-            command.Parameters.Add(new SqlParameter("@market", (object?)selection.Market?.Trim() ?? DBNull.Value));
-            command.Parameters.Add(new SqlParameter("@option", (object?)selection.Option?.Trim() ?? DBNull.Value));
-            command.Parameters.Add(new SqlParameter("@lineValue", (object?)selection.Line ?? DBNull.Value));
             command.Parameters.Add(new SqlParameter("@matchOddId", (object?)selection.MatchOddId ?? DBNull.Value));
 
-            long matchId;
-            decimal currentOdd;
+            var candidates = new List<VirtualBoardSelectionCandidate>();
             await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
             {
-                if (!await reader.ReadAsync(cancellationToken))
+                while (await reader.ReadAsync(cancellationToken))
                 {
-                    errors.Add(new TicketValidationError
-                    {
-                        Code = "selection_not_available",
-                        Field = $"selections[{index}]",
-                        SelectionIndex = index,
-                        Message = "The requested selection is not available on the submitted VirtualHorizon board."
-                    });
-                    continue;
+                    candidates.Add(new VirtualBoardSelectionCandidate(
+                        Convert.ToInt64(reader["BetServiceMatchNo"]),
+                        reader["MatchOddId"] is DBNull ? null : Convert.ToInt64(reader["MatchOddId"]),
+                        reader["Market"] as string,
+                        reader["Option"] as string,
+                        reader["Line"] as string,
+                        Convert.ToDecimal(reader["Odd"])));
                 }
-
-                matchId = Convert.ToInt64(reader["BetServiceMatchNo"]);
-                currentOdd = Convert.ToDecimal(reader["Odd"]);
             }
 
-            if (!VirtualBoardSelectionPolicy.OddsMatch(selection.Odd, currentOdd))
+            var matched = candidates.FirstOrDefault(candidate =>
+                VirtualBoardSelectionPolicy.IsSameSelection(selection, candidate.Market, candidate.Option, candidate.Line));
+            if (matched is null)
+            {
+                LogVirtualBoardSelectionResolutionFailure(
+                    virtualBoardId,
+                    submittedProviderEventId,
+                    selection,
+                    index,
+                    candidates);
+
+                errors.Add(new TicketValidationError
+                {
+                    Code = "selection_not_available",
+                    Field = $"selections[{index}]",
+                    SelectionIndex = index,
+                    Message = "The requested selection is not available on the submitted VirtualHorizon board."
+                });
+                continue;
+            }
+
+            if (!VirtualBoardSelectionPolicy.OddsMatch(selection.Odd, matched.Odd))
             {
                 errors.Add(new TicketValidationError
                 {
                     Code = "odds_changed",
                     Field = $"selections[{index}].odd",
                     SelectionIndex = index,
-                    CurrentOdd = currentOdd,
+                    CurrentOdd = matched.Odd,
                     Message = "The selection odd has changed. Refresh the betslip before placing."
                 });
                 continue;
             }
 
-            resolved.Add(new ResolvedTicketSelection(selection, matchId));
+            resolved.Add(new ResolvedTicketSelection(selection, matched.BetServiceMatchNo));
         }
 
         return errors.Count == 0
@@ -797,6 +810,38 @@ public sealed class TicketDb
             Field = "providerEventId",
             Message = "The VirtualHorizon board has changed. Refresh before placing."
         };
+    }
+
+    private void LogVirtualBoardSelectionResolutionFailure(
+        long submittedBoardId,
+        string submittedProviderEventId,
+        TicketSelectionRequest selection,
+        int selectionIndex,
+        IReadOnlyCollection<VirtualBoardSelectionCandidate> candidates)
+    {
+        var candidateMarketValues = candidates.Select(candidate => candidate.Market).Distinct().ToArray();
+        var candidateOptionValues = candidates.Select(candidate => candidate.Option).Distinct().ToArray();
+        var candidateLineValues = candidates.Select(candidate => candidate.Line).Distinct().ToArray();
+        var candidateMatchOddIds = candidates.Select(candidate => candidate.MatchOddId).Distinct().ToArray();
+        var resolvedBetServiceMatchNos = candidates.Select(candidate => candidate.BetServiceMatchNo).Distinct().ToArray();
+
+        _logger.LogWarning(
+            "VirtualHorizon board selection resolution failed. SubmittedBoardId={SubmittedBoardId}; SubmittedProviderEventId={SubmittedProviderEventId}; SubmittedProviderMatchId={SubmittedProviderMatchId}; ResolvedBetServiceMatchNo={ResolvedBetServiceMatchNo}; SubmittedMarket={SubmittedMarket}; SubmittedOption={SubmittedOption}; SubmittedLine={SubmittedLine}; SubmittedOdd={SubmittedOdd}; SubmittedMatchOddId={SubmittedMatchOddId}; CandidateBoardSelectionCount={CandidateBoardSelectionCount}; CandidateMarketValues={CandidateMarketValues}; CandidateOptionValues={CandidateOptionValues}; CandidateLineValues={CandidateLineValues}; CandidateMatchOddIds={CandidateMatchOddIds}; SelectionIndex={SelectionIndex}",
+            submittedBoardId,
+            submittedProviderEventId,
+            selection.ProviderMatchId,
+            resolvedBetServiceMatchNos.Length == 1 ? resolvedBetServiceMatchNos[0] : null,
+            selection.Market,
+            selection.Option,
+            selection.Line,
+            selection.Odd,
+            selection.MatchOddId,
+            candidates.Count,
+            candidateMarketValues,
+            candidateOptionValues,
+            candidateLineValues,
+            candidateMatchOddIds,
+            selectionIndex);
     }
 
     private async Task<long?> ResolveMatchIdAsync(
@@ -1209,6 +1254,14 @@ public sealed record ProbeResult(bool IsFound, bool IsUnknown, string? Detail)
 }
 
 public sealed record ResolvedTicketSelection(TicketSelectionRequest Selection, long MatchId);
+
+public sealed record VirtualBoardSelectionCandidate(
+    long BetServiceMatchNo,
+    long? MatchOddId,
+    string? Market,
+    string? Option,
+    string? Line,
+    decimal Odd);
 
 public sealed record AuthoritativeSelectionValidation(
     List<ResolvedTicketSelection> Selections,

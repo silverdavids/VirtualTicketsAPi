@@ -78,11 +78,12 @@ public sealed class VirtualBoardPlacementProtectionTests
         Assert.Contains("boardMatch.VirtualBoardId = @virtualBoardId", source);
         Assert.Contains("snapshot.ProviderEventId = @providerEventId", source);
         Assert.Contains("boardMatch.ProviderMatchId = @providerMatchId", source);
-        Assert.Contains("snapshot.Market = @market", source);
-        Assert.Contains("snapshot.[Option] = @option", source);
-        Assert.Contains("TRY_CONVERT(decimal(18, 6), snapshot.Line) = @lineValue", source);
         Assert.Contains("snapshot.IsActive = 1", source);
         Assert.Contains("snapshot.MatchOddId = @matchOddId", source);
+        Assert.Contains("VirtualBoardSelectionPolicy.IsSameSelection", source);
+        Assert.DoesNotContain("snapshot.Market = @market", source);
+        Assert.DoesNotContain("snapshot.[Option] = @option", source);
+        Assert.DoesNotContain("TRY_CONVERT(decimal(18, 6), snapshot.Line) = @lineValue", source);
     }
 
     [Fact]
@@ -100,7 +101,7 @@ public sealed class VirtualBoardPlacementProtectionTests
     {
         var source = File.ReadAllText(Path.Combine(ProjectRoot(), "Data", "TicketDb.cs"));
         var selectionLookupStart = source.IndexOf("const string selectionSql", StringComparison.Ordinal);
-        var selectionLookupEnd = source.IndexOf("long matchId;", selectionLookupStart, StringComparison.Ordinal);
+        var selectionLookupEnd = source.IndexOf("var matched = candidates", selectionLookupStart, StringComparison.Ordinal);
         var selectionLookup = source[selectionLookupStart..selectionLookupEnd];
         Assert.Contains("snapshot.BetServiceMatchNo = boardMatch.BetServiceMatchNo", selectionLookup);
         Assert.DoesNotContain("BetServiceMatchNo = @matchId", selectionLookup);
@@ -124,6 +125,95 @@ public sealed class VirtualBoardPlacementProtectionTests
         Assert.Contains("currentOdd.MatchOddId IS NULL OR ISNULL(currentOdd.IsLocked, 0) = 0", source);
         Assert.Contains("COALESCE(currentOdd.Odd, snapshot.Odd) AS Odd", source);
         Assert.Contains("Code = \"odds_changed\"", source);
+    }
+
+    [Fact]
+    public void Existing_1x2_selection_matches_board_snapshot()
+    {
+        var submitted = Selection("1X2", "1", null);
+
+        Assert.True(VirtualBoardSelectionPolicy.IsSameSelection(submitted, "1X2", "1", ""));
+    }
+
+    [Fact]
+    public void Ou_over_1_5_with_null_match_odd_id_matches_board_snapshot_alias()
+    {
+        var submitted = Selection("OU", "OV1.5", 1.5m);
+
+        Assert.True(VirtualBoardSelectionPolicy.IsSameSelection(submitted, "OU", "OVER_1.5", ""));
+    }
+
+    [Fact]
+    public void Ou_under_selection_matches_board_snapshot_alias()
+    {
+        var submitted = Selection("OU", "UN1.5", 1.5m);
+
+        Assert.True(VirtualBoardSelectionPolicy.IsSameSelection(submitted, "OU", "UNDER_1.5", ""));
+    }
+
+    [Fact]
+    public void Line_based_market_distinguishes_two_lines_for_same_match()
+    {
+        var submitted = Selection("OU", "OV1.5", 1.5m);
+
+        Assert.True(VirtualBoardSelectionPolicy.IsSameSelection(submitted, "OU", "OVER_1.5", ""));
+        Assert.False(VirtualBoardSelectionPolicy.IsSameSelection(submitted, "OU", "OVER_2.5", ""));
+    }
+
+    [Fact]
+    public void Incorrect_line_fails()
+    {
+        var submitted = Selection("OU", "OV1.5", 2.5m);
+
+        Assert.False(VirtualBoardSelectionPolicy.IsSameSelection(submitted, "OU", "OVER_1.5", ""));
+    }
+
+    [Fact]
+    public void Incorrect_option_fails()
+    {
+        var submitted = Selection("OU", "OV1.5", 1.5m);
+
+        Assert.False(VirtualBoardSelectionPolicy.IsSameSelection(submitted, "OU", "UNDER_1.5", ""));
+    }
+
+    [Fact]
+    public void Selection_from_another_board_still_fails_before_policy_matching()
+    {
+        var source = File.ReadAllText(Path.Combine(ProjectRoot(), "Data", "TicketDb.cs"));
+        Assert.Contains("boardMatch.VirtualBoardId = @virtualBoardId", source);
+        Assert.Contains("snapshot.VirtualBoardId = boardMatch.VirtualBoardId", source);
+        Assert.DoesNotContain("FROM dbo.VirtualCurrentBoard", source);
+    }
+
+    [Fact]
+    public void Provider_match_id_resolves_through_board_match_map()
+    {
+        var source = File.ReadAllText(Path.Combine(ProjectRoot(), "Data", "TicketDb.cs"));
+        var selectionLookupStart = source.IndexOf("const string selectionSql", StringComparison.Ordinal);
+        var selectionLookupEnd = source.IndexOf("var matched = candidates", selectionLookupStart, StringComparison.Ordinal);
+        var selectionLookup = source[selectionLookupStart..selectionLookupEnd];
+        Assert.Contains("FROM dbo.VirtualBoardMatchesMap boardMatch WITH (HOLDLOCK)", selectionLookup);
+        Assert.Contains("boardMatch.ProviderMatchId = @providerMatchId", selectionLookup);
+        Assert.Contains("snapshot.BetServiceMatchNo = boardMatch.BetServiceMatchNo", selectionLookup);
+        Assert.DoesNotContain("BetServiceMatchNo = @matchId", selectionLookup);
+    }
+
+    [Fact]
+    public void Board_snapshot_fallback_works_when_match_odds_is_absent()
+    {
+        var source = File.ReadAllText(Path.Combine(ProjectRoot(), "Data", "TicketDb.cs"));
+        Assert.Contains("LEFT JOIN dbo.MatchOdds currentOdd WITH (UPDLOCK, HOLDLOCK)", source);
+        Assert.Contains("COALESCE(currentOdd.Odd, snapshot.Odd) AS Odd", source);
+        Assert.Contains("currentOdd.MatchOddId IS NULL OR ISNULL(currentOdd.IsLocked, 0) = 0", source);
+    }
+
+    [Fact]
+    public void Valid_match_odds_can_still_supply_current_odd_when_available()
+    {
+        var source = File.ReadAllText(Path.Combine(ProjectRoot(), "Data", "TicketDb.cs"));
+        Assert.Contains("currentOdd.BetServiceMatchNo = boardMatch.BetServiceMatchNo", source);
+        Assert.Contains("currentOdd.MatchOddId = snapshot.MatchOddId", source);
+        Assert.Contains("COALESCE(currentOdd.Odd, snapshot.Odd) AS Odd", source);
     }
 
     [Fact]
@@ -160,4 +250,13 @@ public sealed class VirtualBoardPlacementProtectionTests
 
     private static string ProjectRoot() =>
         Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", ".."));
+
+    private static TicketSelectionRequest Selection(string market, string option, decimal? line) => new()
+    {
+        Market = market,
+        Option = option,
+        Line = line,
+        MatchOddId = null,
+        Odd = 1.55m
+    };
 }
