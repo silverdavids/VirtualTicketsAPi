@@ -824,9 +824,23 @@ public sealed class TicketDb
         var candidateLineValues = candidates.Select(candidate => candidate.Line).Distinct().ToArray();
         var candidateMatchOddIds = candidates.Select(candidate => candidate.MatchOddId).Distinct().ToArray();
         var resolvedBetServiceMatchNos = candidates.Select(candidate => candidate.BetServiceMatchNo).Distinct().ToArray();
+        var normalizedSubmitted = VirtualBoardSelectionPolicy.NormalizeSubmittedSelection(
+            selection.Market,
+            selection.Option,
+            selection.Line);
+        var normalizedCandidates = candidates
+            .Select(candidate => VirtualBoardSelectionPolicy.NormalizeCandidateSelection(
+                candidate.Market,
+                candidate.Option,
+                candidate.Line))
+            .Distinct()
+            .ToArray();
+        var normalizedCandidateMarketValues = normalizedCandidates.Select(candidate => candidate.Market).Distinct().ToArray();
+        var normalizedCandidateOptionValues = normalizedCandidates.Select(candidate => candidate.Option).Distinct().ToArray();
+        var normalizedCandidateLineValues = normalizedCandidates.Select(candidate => candidate.Line).Distinct().ToArray();
 
         _logger.LogWarning(
-            "VirtualHorizon board selection resolution failed. SubmittedBoardId={SubmittedBoardId}; SubmittedProviderEventId={SubmittedProviderEventId}; SubmittedProviderMatchId={SubmittedProviderMatchId}; ResolvedBetServiceMatchNo={ResolvedBetServiceMatchNo}; SubmittedMarket={SubmittedMarket}; SubmittedOption={SubmittedOption}; SubmittedLine={SubmittedLine}; SubmittedOdd={SubmittedOdd}; SubmittedMatchOddId={SubmittedMatchOddId}; CandidateBoardSelectionCount={CandidateBoardSelectionCount}; CandidateMarketValues={CandidateMarketValues}; CandidateOptionValues={CandidateOptionValues}; CandidateLineValues={CandidateLineValues}; CandidateMatchOddIds={CandidateMatchOddIds}; SelectionIndex={SelectionIndex}",
+            "VirtualHorizon board selection resolution failed. SubmittedBoardId={SubmittedBoardId}; SubmittedProviderEventId={SubmittedProviderEventId}; SubmittedProviderMatchId={SubmittedProviderMatchId}; ResolvedBetServiceMatchNo={ResolvedBetServiceMatchNo}; SubmittedMarket={SubmittedMarket}; SubmittedOption={SubmittedOption}; SubmittedLine={SubmittedLine}; SubmittedOdd={SubmittedOdd}; SubmittedMatchOddId={SubmittedMatchOddId}; CandidateBoardSelectionCount={CandidateBoardSelectionCount}; CandidateMarketValues={CandidateMarketValues}; CandidateOptionValues={CandidateOptionValues}; CandidateLineValues={CandidateLineValues}; CandidateMatchOddIds={CandidateMatchOddIds}; NormalizedSubmittedMarket={NormalizedSubmittedMarket}; NormalizedSubmittedOption={NormalizedSubmittedOption}; NormalizedSubmittedLine={NormalizedSubmittedLine}; NormalizedCandidateMarket={NormalizedCandidateMarket}; NormalizedCandidateOption={NormalizedCandidateOption}; NormalizedCandidateLine={NormalizedCandidateLine}; SelectionIndex={SelectionIndex}",
             submittedBoardId,
             submittedProviderEventId,
             selection.ProviderMatchId,
@@ -841,6 +855,12 @@ public sealed class TicketDb
             candidateOptionValues,
             candidateLineValues,
             candidateMatchOddIds,
+            normalizedSubmitted.Market,
+            normalizedSubmitted.Option,
+            normalizedSubmitted.Line,
+            normalizedCandidateMarketValues,
+            normalizedCandidateOptionValues,
+            normalizedCandidateLineValues,
             selectionIndex);
     }
 

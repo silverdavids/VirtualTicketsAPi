@@ -151,6 +151,80 @@ public sealed class VirtualBoardPlacementProtectionTests
         Assert.True(VirtualBoardSelectionPolicy.IsSameSelection(submitted, "OU", "UNDER_1.5", ""));
     }
 
+    [Theory]
+    [InlineData("OV0.5", "OVER_0.5_HOME")]
+    [InlineData("UN0.5", "UNDER_0.5_HOME")]
+    public void Home_team_total_matches_scoped_team_goals_snapshot(string submittedOption, string snapshotOption)
+    {
+        var submitted = Selection("HOME_OU", submittedOption, 0.5m);
+
+        Assert.True(VirtualBoardSelectionPolicy.IsSameSelection(
+            submitted, "TEAM_GOALS_HOME_AWAY", snapshotOption, ""));
+    }
+
+    [Fact]
+    public void Away_team_total_matches_scoped_team_goals_snapshot()
+    {
+        var submitted = Selection("AWAY_OU", "OV0.5", 0.5m);
+
+        Assert.True(VirtualBoardSelectionPolicy.IsSameSelection(
+            submitted, "TEAM_GOALS_HOME_AWAY", "OVER_0.5_AWAY", ""));
+    }
+
+    [Fact]
+    public void Home_team_total_does_not_match_a_different_line()
+    {
+        var submitted = Selection("HOME_OU", "OV1.5", 1.5m);
+
+        Assert.False(VirtualBoardSelectionPolicy.IsSameSelection(
+            submitted, "TEAM_GOALS_HOME_AWAY", "OVER_0.5_HOME", ""));
+    }
+
+    [Theory]
+    [InlineData("OU", "OVER_0.5")]
+    [InlineData("TEAM_GOALS_HOME_AWAY", "OVER_0.5_AWAY")]
+    public void Home_team_total_does_not_cross_market_scope(string snapshotMarket, string snapshotOption)
+    {
+        var submitted = Selection("HOME_OU", "OVER 0.5", 0.5m);
+
+        Assert.False(VirtualBoardSelectionPolicy.IsSameSelection(
+            submitted, snapshotMarket, snapshotOption, ""));
+    }
+
+    [Fact]
+    public void Invalid_client_created_team_total_option_is_rejected()
+    {
+        var submitted = Selection("HOME_OU", "YES0.5", 0.5m);
+
+        Assert.False(VirtualBoardSelectionPolicy.IsSameSelection(
+            submitted, "TEAM_GOALS_HOME_AWAY", "OVER_0.5_HOME", ""));
+    }
+
+    [Fact]
+    public void Team_total_snapshot_requires_an_exact_known_scope_encoding()
+    {
+        var submitted = Selection("HOME_OU", "OV0.5", 0.5m);
+
+        Assert.False(VirtualBoardSelectionPolicy.IsSameSelection(
+            submitted, "TEAM_GOALS_HOME_AWAY", "OVER_0.5", ""));
+        Assert.False(VirtualBoardSelectionPolicy.IsSameSelection(
+            submitted, "TEAM_GOALS_HOME_AWAY", "OVER_0.5_PLAYER", ""));
+    }
+
+    [Fact]
+    public void Combined_result_and_total_market_preserves_its_result_scope()
+    {
+        var submitted = Selection("OVER_UNDER_1X2", "OVER_1.5_HOME", null);
+
+        Assert.True(VirtualBoardSelectionPolicy.IsSameSelection(
+            submitted, "OVER_UNDER_1X2", "OVER_1.5_HOME", ""));
+        Assert.False(VirtualBoardSelectionPolicy.IsSameSelection(
+            submitted, "OVER_UNDER_1X2", "OVER_1.5_AWAY", ""));
+        Assert.False(VirtualBoardSelectionPolicy.IsSameSelection(
+            Selection("OVER_UNDER_1X2", "OV1.5", 1.5m),
+            "OVER_UNDER_1X2", "OVER_1.5_HOME", ""));
+    }
+
     [Fact]
     public void Line_based_market_distinguishes_two_lines_for_same_match()
     {
