@@ -17,34 +17,11 @@ public static class VirtualBoardSelectionPolicy
         string? candidateOption,
         string? candidateLine)
     {
-        var submittedMarket = NormalizeMarket(submitted.Market);
-        var snapshotMarket = NormalizeCandidateMarket(candidateMarket, candidateOption);
-        if (submittedMarket is null || snapshotMarket is null || submittedMarket != snapshotMarket)
-        {
-            return false;
-        }
-
-        var submittedOption = NormalizeSubmittedOption(submittedMarket, submitted.Option, submitted.Line);
-        var snapshotOption = NormalizeCandidateOption(candidateMarket, candidateOption, TryParseLine(candidateLine));
-        if (submittedOption is null || snapshotOption is null || submittedOption != snapshotOption)
-        {
-            return false;
-        }
-
-        var submittedLine = submitted.Line;
-        var snapshotLine = TryParseLine(candidateLine);
-        if (IsTotalMarket(snapshotMarket))
-        {
-            snapshotLine ??= ExtractLineFromLineOption(candidateOption);
-        }
-        if (submittedLine.HasValue || snapshotLine.HasValue)
-        {
-            return submittedLine.HasValue
-                && snapshotLine.HasValue
-                && submittedLine.Value == snapshotLine.Value;
-        }
-
-        return true;
+        var normalizedSubmitted = NormalizeSubmittedSelection(submitted.Market, submitted.Option, submitted.Line);
+        var normalizedCandidate = NormalizeCandidateSelection(candidateMarket, candidateOption, candidateLine);
+        return normalizedSubmitted.Market is not null
+            && normalizedSubmitted.Option is not null
+            && normalizedSubmitted == normalizedCandidate;
     }
 
     public static string? NormalizeMarket(string? market)
@@ -89,6 +66,11 @@ public static class VirtualBoardSelectionPolicy
         decimal? line)
     {
         var normalizedMarket = NormalizeMarket(market);
+        if (TryNormalizeSubmittedCombinedMarket(normalizedMarket, option, line, out var combined))
+        {
+            return combined;
+        }
+
         return new(
             normalizedMarket,
             NormalizeSubmittedOption(normalizedMarket, option, line),
@@ -101,6 +83,11 @@ public static class VirtualBoardSelectionPolicy
         string? line)
     {
         var parsedLine = TryParseLine(line);
+        if (TryNormalizeCandidateCombinedMarket(market, option, parsedLine, out var combined))
+        {
+            return combined;
+        }
+
         var normalizedMarket = NormalizeCandidateMarket(market, option);
         return new(
             normalizedMarket,
@@ -141,6 +128,87 @@ public static class VirtualBoardSelectionPolicy
             ? ExtractLine(option)
             : null;
     }
+
+    private static bool TryNormalizeSubmittedCombinedMarket(
+        string? market,
+        string? option,
+        decimal? explicitLine,
+        out NormalizedVirtualBoardSelection normalized)
+    {
+        normalized = InvalidSelection();
+        if (market is null || !market.StartsWith("1X2_OU", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var marketMatch = Regex.Match(market, @"^1X2_OU_(\d+(?:\.\d+)?)$", RegexOptions.CultureInvariant);
+        var optionValue = NormalizeToken(option);
+        var optionMatch = optionValue is null
+            ? Match.Empty
+            : Regex.Match(
+                optionValue,
+                @"^(1|X|2)\+(OV|OVER|UN|UNDER)_?(\d+(?:\.\d+)?)$",
+                RegexOptions.CultureInvariant);
+        if (!marketMatch.Success || !optionMatch.Success
+            || !TryParseInvariantDecimal(marketMatch.Groups[1].Value, out var marketLine)
+            || !TryParseInvariantDecimal(optionMatch.Groups[3].Value, out var optionLine)
+            || marketLine != optionLine
+            || (explicitLine.HasValue && explicitLine.Value != marketLine))
+        {
+            return true;
+        }
+
+        var direction = optionMatch.Groups[2].Value is "OV" or "OVER" ? "OVER" : "UNDER";
+        normalized = new(
+            "1X2_OU",
+            $"{optionMatch.Groups[1].Value}+{direction}_{FormatLine(marketLine)}",
+            marketLine);
+        return true;
+    }
+
+    private static bool TryNormalizeCandidateCombinedMarket(
+        string? market,
+        string? option,
+        decimal? explicitLine,
+        out NormalizedVirtualBoardSelection normalized)
+    {
+        normalized = InvalidSelection();
+        if (NormalizeMarket(market) != "OVER_UNDER_1X2")
+        {
+            return false;
+        }
+
+        var optionValue = NormalizeToken(option);
+        var match = optionValue is null
+            ? Match.Empty
+            : Regex.Match(
+                optionValue,
+                @"^(OVER|UNDER)_(\d+(?:\.\d+)?)_(HOME|DRAW|AWAY)$",
+                RegexOptions.CultureInvariant);
+        if (!match.Success
+            || !TryParseInvariantDecimal(match.Groups[2].Value, out var optionLine)
+            || (explicitLine.HasValue && explicitLine.Value != optionLine))
+        {
+            return true;
+        }
+
+        var result = match.Groups[3].Value switch
+        {
+            "HOME" => "1",
+            "DRAW" => "X",
+            _ => "2"
+        };
+        normalized = new(
+            "1X2_OU",
+            $"{result}+{match.Groups[1].Value}_{FormatLine(optionLine)}",
+            optionLine);
+        return true;
+    }
+
+    private static bool TryParseInvariantDecimal(string value, out decimal parsed) =>
+        decimal.TryParse(value, NumberStyles.Number, CultureInfo.InvariantCulture, out parsed);
+
+    private static NormalizedVirtualBoardSelection InvalidSelection() => new(null, null, null);
 
     private static string? NormalizeCandidateMarket(string? market, string? option)
     {
